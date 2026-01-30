@@ -232,8 +232,8 @@ def run_pipeline(input_video: str, out_dir: str = "outputs", **kwargs):
             logger.info("Loaded cached shot cuts")
         else:
             try:
-                from scenedetect import SceneManager, open_video
-                from scenedetect.detectors import ContentDetector
+                from scenedetect import SceneManager, open_video  # type: ignore[import-not-found]
+                from scenedetect.detectors import ContentDetector  # type: ignore[import-not-found]
 
                 video = open_video(str(state["VIDEO_PATH"]))
                 scene_manager = SceneManager()
