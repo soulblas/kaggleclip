@@ -57,3 +57,24 @@ class StageTimer:
             self.logger.info(f"[STAGE {self.stage_id:02d}] END   - {self.name} ({self.dt:.2f}s)")
         log_flush(self.logger)
         return False
+
+
+def setup_pipeline_logger(log_file: Path) -> logging.Logger:
+    logger = logging.getLogger("viralshort")
+    logger.setLevel(logging.INFO)
+    logger.handlers.clear()
+
+    fmt = logging.Formatter("%(asctime)s | %(levelname)s | %(message)s")
+    log_file.parent.mkdir(parents=True, exist_ok=True)
+
+    fh = logging.FileHandler(log_file, encoding="utf-8")
+    fh.setLevel(logging.INFO)
+    fh.setFormatter(fmt)
+
+    sh = logging.StreamHandler(sys.stdout)
+    sh.setLevel(logging.INFO)
+    sh.setFormatter(fmt)
+
+    logger.addHandler(fh)
+    logger.addHandler(sh)
+    return logger

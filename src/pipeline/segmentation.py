@@ -74,13 +74,13 @@ def _speech_blocks_from_energy(
 
 
 def run_segmentation(state: Dict[str, Any]) -> Dict[str, Any]:
-    art_dir = Path(state["ART_DIR"])
+    raw_dir = Path(state["RAW_SEGMENTS_DIR"])
     video_path = Path(state["VIDEO_PATH"])
     analyzed_duration = float(state["ANALYZED_DURATION"])
     ffmpeg_bin = state.get("FFMPEG_BIN", "ffmpeg")
 
     with StageTimer(2, "Audio Extract + Global Analysis"):
-        audio_wav = Path(art_dir) / "audio.wav"
+        audio_wav = Path(raw_dir) / "audio.wav"
         cmd = [
             ffmpeg_bin,
             "-y",
@@ -101,7 +101,7 @@ def run_segmentation(state: Dict[str, Any]) -> Dict[str, Any]:
         subprocess.run(cmd, check=True)
         logger.info(f"Audio extracted: {audio_wav}")
 
-        sil_path = Path(art_dir) / "silence_segments.json"
+        sil_path = Path(raw_dir) / "silence_segments.json"
         if sil_path.exists():
             silence_segments = read_json(sil_path)
             logger.info("Loaded cached silence_segments.json")
@@ -179,7 +179,7 @@ def run_segmentation(state: Dict[str, Any]) -> Dict[str, Any]:
             t = float(i / sr)
             energy_curve.append({"time": t, "rms": val})
 
-        write_json(Path(art_dir) / "energy_curve.json", energy_curve)
+        write_json(Path(raw_dir) / "energy_curve.json", energy_curve)
         logger.info(f"Energy points: {len(energy_curve)} (saved to energy_curve.json)")
 
     with StageTimer(2, "Speech Blocks (silence complement + VAD fallback)"):
@@ -189,7 +189,7 @@ def run_segmentation(state: Dict[str, Any]) -> Dict[str, Any]:
             logger.warning("No speech blocks from silence; using energy VAD fallback")
             speech_blocks = _speech_blocks_from_energy(energy_curve, total)
 
-        write_json(Path(art_dir) / "speech_blocks.json", speech_blocks)
+        write_json(Path(raw_dir) / "speech_blocks.json", speech_blocks)
         logger.info(f"Speech blocks: {len(speech_blocks)}")
 
         if not speech_blocks:

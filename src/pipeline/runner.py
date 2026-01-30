@@ -4,7 +4,6 @@ import json
 import logging
 import random
 import subprocess
-import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List
@@ -14,27 +13,13 @@ from .asr_light import run_asr
 from .candidates import run_candidate_mining
 from .export import ensure_outdir, run_export, write_agent_meta
 from .features import run_feature_extraction
-from .io_utils import write_json, read_json
-from .logging_utils import StageTimer, log_flush
+from .io_utils import write_json, read_json, resolve_output_paths
+from .logging_utils import StageTimer, log_flush, setup_pipeline_logger
 from .scoring import run_scoring
 from .segmentation import run_segmentation
 from .selection import run_selection, snap_selected
 
 logger = logging.getLogger("viralshort")
-
-
-def _setup_logging(log_file: Path) -> None:
-    logger.setLevel(logging.INFO)
-    logger.handlers.clear()
-    fmt = logging.Formatter("%(asctime)s | %(levelname)s | %(message)s")
-    fh = logging.FileHandler(log_file, encoding="utf-8")
-    fh.setLevel(logging.INFO)
-    fh.setFormatter(fmt)
-    sh = logging.StreamHandler(sys.stdout)
-    sh.setLevel(logging.INFO)
-    sh.setFormatter(fmt)
-    logger.addHandler(fh)
-    logger.addHandler(sh)
 
 
 def _resolve_input_video(input_video: str | None) -> Path:
@@ -64,12 +49,13 @@ def _resolve_input_video(input_video: str | None) -> Path:
 
 def run_pipeline(input_video: str, out_dir: str = "outputs", **kwargs):
     out_dir_path = ensure_outdir(out_dir)
+    output_paths = resolve_output_paths(out_dir_path)
 
     agent = load_agent_contract("AGENTS.md")
-    write_agent_meta(out_dir_path, agent)
+    write_agent_meta(output_paths["metadata_dir"], agent)
 
-    log_file = out_dir_path / "pipeline_log.txt"
-    _setup_logging(log_file)
+    log_file = output_paths["logs_dir"] / "pipeline.log"
+    setup_pipeline_logger(log_file)
 
     state: Dict[str, Any] = {}
 
@@ -95,6 +81,12 @@ def run_pipeline(input_video: str, out_dir: str = "outputs", **kwargs):
     state["ASR_LANGUAGE"] = "id"
     state["ASR_ENABLED"] = True
     state["ASR_TOP_PERCENT"] = 0.40
+    state["ASR_TOPN_PER_BUCKET"] = int(kwargs.get("asr_topn_per_bucket", 8))
+    state["ASR_MODEL_NAME"] = kwargs.get("asr_model_name", "tiny")
+    state["ASR_BEAM_SIZE"] = int(kwargs.get("asr_beam_size", 1))
+    state["ASR_LIGHT_MODE"] = bool(kwargs.get("asr_light_mode", True))
+    state["ASR_LIGHT_SEC"] = float(kwargs.get("asr_light_sec", 12.0))
+    state["ASR_LIGHT_OFFSET"] = float(kwargs.get("asr_light_offset", 2.0))
     state["MAX_ASR_BLOCK_SEC"] = 28.0
     state["MAX_ASR_BLOCK_WALL_SEC"] = 45.0
     state["ASR_BLOCK_OVERLAP_SEC"] = 0.25
@@ -133,27 +125,27 @@ def run_pipeline(input_video: str, out_dir: str = "outputs", **kwargs):
     state["FFPROBE_BIN"] = "ffprobe"
 
     state["RUN_TIMESTAMP"] = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-    state["OUT_DIR"] = out_dir_path
-    state["RUN_DIR"] = out_dir_path
-    state["CACHE_DIR"] = out_dir_path / "cache"
-    state["LOG_DIR"] = out_dir_path / "logs"
-    state["ART_DIR"] = out_dir_path / "artifacts"
-    state["CLIPS_DIR"] = out_dir_path / "clips"
-    state["THUMBS_DIR"] = out_dir_path / "thumbnails"
-    state["PUBLIC_OUT_DIR"] = out_dir_path / "public"
-    state["PUBLIC_CLIPS_DIR"] = out_dir_path / "public" / "clips"
-    state["PUBLIC_THUMBS_DIR"] = out_dir_path / "public" / "thumbnails"
+    state["OUTPUT_PATHS"] = output_paths
+    state["OUT_DIR"] = output_paths["base_dir"]
+    state["RAW_SEGMENTS_DIR"] = output_paths["raw_segments_dir"]
+    state["SCORED_SEGMENTS_DIR"] = output_paths["scored_segments_dir"]
+    state["SELECTED_CLIPS_DIR"] = output_paths["selected_clips_dir"]
+    state["THUMBS_DIR"] = output_paths["thumbnails_dir"]
+    state["METADATA_DIR"] = output_paths["metadata_dir"]
+    state["LOG_DIR"] = output_paths["logs_dir"]
+    state["CACHE_DIR"] = output_paths["raw_segments_dir"] / "_cache"
+    state["CACHE_DIR"].mkdir(parents=True, exist_ok=True)
 
-    for p in [
-        state["CACHE_DIR"],
-        state["LOG_DIR"],
-        state["ART_DIR"],
-        state["CLIPS_DIR"],
-        state["THUMBS_DIR"],
-        state["PUBLIC_CLIPS_DIR"],
-        state["PUBLIC_THUMBS_DIR"],
-    ]:
-        Path(p).mkdir(parents=True, exist_ok=True)
+    state["TAIL_EXT_SEC"] = float(kwargs.get("tail_ext_sec", 1.6))
+    state["TAIL_MAX_SEC"] = float(kwargs.get("tail_max_sec", 3.0))
+    state["LEAD_SILENCE_TRIM_SEC"] = float(kwargs.get("lead_silence_trim_sec", 0.8))
+    state["START_EXPAND_MIN"] = float(kwargs.get("start_expand_min", 3.0))
+    state["START_EXPAND_MAX"] = float(kwargs.get("start_expand_max", 8.0))
+    state["START_SPEECH_WINDOW"] = float(kwargs.get("start_speech_window", 0.6))
+    state["SNAP_WORD_RADIUS"] = float(kwargs.get("snap_word_radius", 1.8))
+    state["SNAP_SILENCE_RADIUS"] = float(kwargs.get("snap_silence_radius", 1.2))
+
+    # resolve_output_paths already ensures directory creation
 
     logger.info(f"OUT_DIR: {out_dir_path}")
     logger.info(
@@ -185,7 +177,7 @@ def run_pipeline(input_video: str, out_dir: str = "outputs", **kwargs):
         logger.info(f"Duration: {duration:.2f}s")
 
         write_json(
-            Path(state["ART_DIR"]) / "video_meta.json",
+            Path(state["RAW_SEGMENTS_DIR"]) / "video_meta.json",
             {
                 "video_path": str(video_path),
                 "duration_sec": duration,
@@ -221,12 +213,15 @@ def run_pipeline(input_video: str, out_dir: str = "outputs", **kwargs):
             ]
             subprocess.run(cmd, check=True)
             thumb_paths.append(str(outp))
-        write_json(Path(state["ART_DIR"]) / "thumbnail_samples.json", {"timestamps": ts, "paths": thumb_paths})
+        write_json(
+            Path(state["RAW_SEGMENTS_DIR"]) / "thumbnail_samples.json",
+            {"timestamps": ts, "paths": thumb_paths},
+        )
         logger.info(f"Sample thumbnails: {len(thumb_paths)}")
 
     with StageTimer(4, "Shot Detection (Optional)"):
         shot_cuts = []
-        shot_path = Path(state["ART_DIR"]) / "shot_cuts.json"
+        shot_path = Path(state["RAW_SEGMENTS_DIR"]) / "shot_cuts.json"
         if shot_path.exists():
             shot_cuts = read_json(shot_path)
             logger.info("Loaded cached shot cuts")

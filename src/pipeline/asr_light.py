@@ -85,12 +85,12 @@ def _light_window(start, end, asr_light_sec, asr_light_offset):
 
 def run_asr(state: Dict[str, Any]) -> Dict[str, Any]:
     analyzed_duration = float(state.get("ANALYZED_DURATION", 0.0))
-    asr_topn_per_bucket = int(os.getenv("ASR_TOPN_PER_BUCKET", "4"))
-    asr_model_name = os.getenv("ASR_MODEL_NAME", "tiny")
-    asr_beam_size = int(os.getenv("ASR_BEAM_SIZE", "1"))
-    asr_light_mode = os.getenv("ASR_LIGHT_MODE", "1") == "1"
-    asr_light_sec = float(os.getenv("ASR_LIGHT_SEC", "10.0"))
-    asr_light_offset = float(os.getenv("ASR_LIGHT_OFFSET", "2.0"))
+    asr_topn_per_bucket = int(state.get("ASR_TOPN_PER_BUCKET", os.getenv("ASR_TOPN_PER_BUCKET", "4")))
+    asr_model_name = state.get("ASR_MODEL_NAME", os.getenv("ASR_MODEL_NAME", "tiny"))
+    asr_beam_size = int(state.get("ASR_BEAM_SIZE", os.getenv("ASR_BEAM_SIZE", "1")))
+    asr_light_mode = bool(state.get("ASR_LIGHT_MODE", os.getenv("ASR_LIGHT_MODE", "1") == "1"))
+    asr_light_sec = float(state.get("ASR_LIGHT_SEC", os.getenv("ASR_LIGHT_SEC", "10.0")))
+    asr_light_offset = float(state.get("ASR_LIGHT_OFFSET", os.getenv("ASR_LIGHT_OFFSET", "2.0")))
 
     max_asr_block_sec = float(state.get("MAX_ASR_BLOCK_SEC", 28.0))
     asr_block_overlap_sec = float(state.get("ASR_BLOCK_OVERLAP_SEC", 0.25))
@@ -98,13 +98,13 @@ def run_asr(state: Dict[str, Any]) -> Dict[str, Any]:
     asr_language = state.get("ASR_LANGUAGE", "id")
     ffmpeg_bin = state.get("FFMPEG_BIN", "ffmpeg")
     cache_dir = Path(state["CACHE_DIR"])
-    art_dir = Path(state["ART_DIR"])
+    scored_dir = Path(state["SCORED_SEGMENTS_DIR"])
     audio_wav = Path(state["AUDIO_WAV"])
     trigger_words = state.get("TRIGGER_WORDS", [])
 
     with StageTimer(8, "ASR (top-N per bucket, cache, fail-safe)"):
         transcripts: Dict[str, Any] = {}
-        transcript_cache_path = art_dir / "transcript.json"
+        transcript_cache_path = scored_dir / "transcript.json"
 
         if transcript_cache_path.exists():
             try:

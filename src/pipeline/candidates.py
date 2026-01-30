@@ -274,7 +274,7 @@ def run_candidate_mining(state: Dict[str, Any]) -> Dict[str, Any]:
             final.append(c)
 
         candidates = sorted(final, key=lambda x: (x["start"], x["end"], x["id"]))
-        write_json(Path(state["ART_DIR"]) / "candidates.json", candidates)
+        write_json(Path(state["RAW_SEGMENTS_DIR"]) / "candidates.json", candidates)
 
         logger.info(f"Candidates: {len(candidates)}")
         log_flush()

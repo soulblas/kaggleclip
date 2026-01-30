@@ -40,8 +40,7 @@ def run_selection(state: Dict[str, Any]) -> Dict[str, Any]:
     min_gap_sec = float(state.get("MIN_GAP_SEC", 30.0))
     max_final_clips = int(state.get("MAX_FINAL_CLIPS", 6))
     candidates = state.get("CANDIDATES", [])
-    art_dir = Path(state["ART_DIR"])
-    out_dir = Path(state["OUT_DIR"])
+    metadata_dir = Path(state["METADATA_DIR"])
 
     with StageTimer(10, "Selection (bucket quota + fairness)"):
         selection_audit = []
@@ -191,10 +190,9 @@ def run_selection(state: Dict[str, Any]) -> Dict[str, Any]:
                 )
 
         selected_sorted = sorted(selected, key=lambda c: (c["start"], c["id"]))
-        write_json(art_dir / "selected.json", selected_sorted)
-        write_json(art_dir / "selection_audit.json", selection_audit)
-        write_json(out_dir / "selection_audit.json", selection_audit)
-        write_json(out_dir / "bucket_stats.json", bucket_stats)
+        write_json(metadata_dir / "selected.json", selected_sorted)
+        write_json(metadata_dir / "selection_audit.json", selection_audit)
+        write_json(metadata_dir / "bucket_stats.json", bucket_stats)
 
         logger.info("=== SELECTED CLIPS (chronological) ===")
         for j, c in enumerate(selected_sorted, 1):
@@ -215,7 +213,7 @@ def snap_selected(state: Dict[str, Any]) -> Dict[str, Any]:
     analyzed_duration = float(state.get("ANALYZED_DURATION", 0.0))
     min_clip_sec = float(state.get("MIN_CLIP_SEC", 18.0))
     max_clip_sec = float(state.get("MAX_CLIP_SEC", 60.0))
-    art_dir = Path(state["ART_DIR"])
+    metadata_dir = Path(state["METADATA_DIR"])
 
     def snap_to_words(start: float, end: float, words: List[Dict[str, Any]], radius: float = 1.4):
         if not words:
@@ -257,12 +255,14 @@ def snap_selected(state: Dict[str, Any]) -> Dict[str, Any]:
                 return t + direction * shift
         return t
 
-    tail_ext_sec = 1.2
-    tail_max_sec = 2.0
-    lead_silence_trim_sec = 0.8
-    start_expand_min = 2.0
-    start_expand_max = 6.0
-    start_speech_window = 0.6
+    tail_ext_sec = float(state.get("TAIL_EXT_SEC", 1.2))
+    tail_max_sec = float(state.get("TAIL_MAX_SEC", 2.0))
+    lead_silence_trim_sec = float(state.get("LEAD_SILENCE_TRIM_SEC", 0.8))
+    start_expand_min = float(state.get("START_EXPAND_MIN", 2.0))
+    start_expand_max = float(state.get("START_EXPAND_MAX", 6.0))
+    start_speech_window = float(state.get("START_SPEECH_WINDOW", 0.6))
+    snap_word_radius = float(state.get("SNAP_WORD_RADIUS", 1.4))
+    snap_silence_radius = float(state.get("SNAP_SILENCE_RADIUS", 1.0))
 
     def _find_silence_start_after(t: float, silence_segments: List[List[float]], max_after: float):
         best = None
@@ -423,11 +423,11 @@ def snap_selected(state: Dict[str, Any]) -> Dict[str, Any]:
                         s = float(ws_prev)
                         _add_reason(c, f"context:expand_word(-{s_before - s:.2f}s)")
 
-            s2, e2 = snap_to_words(s, e, words, radius=1.4)
+            s2, e2 = snap_to_words(s, e, words, radius=snap_word_radius)
             _add_reason(c, "snap:word" if words else "snap:nowords")
 
             if (e2 - s2) < min_clip_sec:
-                s2, e2 = snap_to_silence_edges(s, e, silence_segments, radius=1.0)
+                s2, e2 = snap_to_silence_edges(s, e, silence_segments, radius=snap_silence_radius)
                 _add_reason(c, "snap:silence_fallback")
 
             s2 = max(0.0, float(s2))
@@ -501,11 +501,11 @@ def snap_selected(state: Dict[str, Any]) -> Dict[str, Any]:
             c["end"] = float(e2)
             c["duration"] = float(e2 - s2)
 
-        write_json(art_dir / "selected_snapped.json", state.get("SELECTED", []))
+        write_json(metadata_dir / "selected_snapped.json", state.get("SELECTED", []))
         logger.info("Snapping completed (end-of-idea polish enabled).")
 
         try:
-            write_json(art_dir / "transcript.json", transcripts)
+            write_json(Path(state["SCORED_SEGMENTS_DIR"]) / "transcript.json", transcripts)
             logger.info(f"Saved transcript cache after snapping (entries={len(transcripts)})")
         except Exception as e:
             logger.warning(f"Failed to save transcript cache after snapping: {e}")

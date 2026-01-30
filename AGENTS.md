@@ -143,15 +143,15 @@ Rules:
 
 ## 10) Required Outputs (Audit Contract)
 The pipeline MUST write:
-- outputs/agent_meta.json
+- outputs/04_metadata/agent_meta.json
   - agent_file_present, agent_sha256, agent_version
-- outputs/ranking.csv
+- outputs/04_metadata/ranking.csv
   - all candidates with component scores + bucket id + normalization stats
-- outputs/selection_audit.json
+- outputs/04_metadata/selection_audit.json
   - for every candidate: selected(bool), reason_codes[], key scores, end_reason
-- outputs/bucket_stats.json
+- outputs/04_metadata/bucket_stats.json
   - candidates per bucket, thresholds used, quota met or not + why
-- outputs/pipeline_log.txt
+- outputs/logs/pipeline.log
   - stage-ordered logs, timings, warnings
 
 ## 11) Reason Codes (Minimum Set)

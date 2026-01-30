@@ -140,11 +140,9 @@ def run_export(state: Dict[str, Any]) -> Dict[str, Any]:
     audio_bitrate = state.get("AUDIO_BITRATE", "160k")
 
     video_path = Path(state["VIDEO_PATH"])
-    clips_dir = Path(state["CLIPS_DIR"])
+    clips_dir = Path(state["SELECTED_CLIPS_DIR"])
     thumbs_dir = Path(state["THUMBS_DIR"])
-    out_dir = Path(state["OUT_DIR"])
-    public_clips_dir = state.get("PUBLIC_CLIPS_DIR")
-    public_thumbs_dir = state.get("PUBLIC_THUMBS_DIR")
+    metadata_dir = Path(state["METADATA_DIR"])
     ffprobe_bin = state.get("FFPROBE_BIN", "ffprobe")
 
     with StageTimer(
@@ -155,7 +153,7 @@ def run_export(state: Dict[str, Any]) -> Dict[str, Any]:
 
         clips_dir.mkdir(parents=True, exist_ok=True)
         thumbs_dir.mkdir(parents=True, exist_ok=True)
-        out_dir.mkdir(parents=True, exist_ok=True)
+        metadata_dir.mkdir(parents=True, exist_ok=True)
 
         for p in clips_dir.glob("*.mp4"):
             p.unlink()
@@ -176,29 +174,8 @@ def run_export(state: Dict[str, Any]) -> Dict[str, Any]:
             export_clip(video_path, clip_out, st, en, export_w, export_h, fps_export, audio_bitrate)
             _validate_clip_file(ffprobe_bin, clip_out, expected_dur=(en - st))
 
-            if public_clips_dir:
-                try:
-                    public_clips_dir = Path(public_clips_dir)
-                    public_clips_dir.mkdir(parents=True, exist_ok=True)
-                    public_clip = public_clips_dir / clip_out.name
-                    if public_clip.exists():
-                        public_clip.unlink()
-                    public_clip.write_bytes(clip_out.read_bytes())
-                except Exception:
-                    pass
-
             t_thumb = st + min(0.5, max(0.0, dur * 0.10))
             export_thumb(video_path, thumb_out, t_thumb, export_w, export_h)
-            if public_thumbs_dir:
-                try:
-                    public_thumbs_dir = Path(public_thumbs_dir)
-                    public_thumbs_dir.mkdir(parents=True, exist_ok=True)
-                    public_thumb = public_thumbs_dir / thumb_out.name
-                    if public_thumb.exists():
-                        public_thumb.unlink()
-                    public_thumb.write_bytes(thumb_out.read_bytes())
-                except Exception:
-                    pass
 
             er = c.get("editorial_reason", [])
             er = " | ".join(er) if isinstance(er, list) else str(er)
@@ -217,7 +194,7 @@ def run_export(state: Dict[str, Any]) -> Dict[str, Any]:
                 }
             )
 
-        ranking_csv = out_dir / "selected_ranking.csv"
+        ranking_csv = metadata_dir / "selected_ranking.csv"
         with ranking_csv.open("w", newline="", encoding="utf-8") as f:
             fieldnames = [
                 "rank",

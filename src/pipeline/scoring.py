@@ -6,6 +6,7 @@ import re
 from pathlib import Path
 from typing import Any, Dict
 
+from .io_utils import write_json
 from .logging_utils import StageTimer, log_flush
 
 logger = logging.getLogger("viralshort")
@@ -70,7 +71,8 @@ def finishability_score(end_t: float, silence_segments, speech_blocks) -> float:
 
 def run_scoring(state: Dict[str, Any]) -> Dict[str, Any]:
     analyzed_duration = float(state.get("ANALYZED_DURATION", 0.0))
-    out_dir = Path(state["OUT_DIR"])
+    metadata_dir = Path(state["METADATA_DIR"])
+    scored_dir = Path(state["SCORED_SEGMENTS_DIR"])
     candidates = state.get("CANDIDATES", [])
     transcripts = state.get("TRANSCRIPTS", {})
     silence_segments = state.get("SILENCE_SEGMENTS", [])
@@ -193,7 +195,7 @@ def run_scoring(state: Dict[str, Any]) -> Dict[str, Any]:
         for c in candidates:
             c["editorial_reason"] = editorial_reason(c)
 
-        ranking_csv = Path(out_dir) / "ranking.csv"
+        ranking_csv = Path(metadata_dir) / "ranking.csv"
         with ranking_csv.open("w", newline="", encoding="utf-8") as f:
             fieldnames = [
                 "id",
@@ -235,6 +237,7 @@ def run_scoring(state: Dict[str, Any]) -> Dict[str, Any]:
                     }
                 )
 
+        write_json(scored_dir / "scored_candidates.json", candidates)
         logger.info(f"Wrote ranking.csv (all candidates): {ranking_csv}")
         log_flush()
 
