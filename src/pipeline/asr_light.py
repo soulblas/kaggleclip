@@ -1,0 +1,300 @@
+from __future__ import annotations
+
+import logging
+import os
+import subprocess
+import time
+from pathlib import Path
+from typing import Any, Dict, List, Tuple
+
+from .io_utils import read_json, write_json
+from .logging_utils import StageTimer, log_flush
+
+logger = logging.getLogger("viralshort")
+
+
+TIME_BUCKETS = 5
+
+
+def split_ranges(start, end, max_len, overlap):
+    ranges = []
+    t = start
+    while t < end - 0.1:
+        t2 = min(end, t + max_len)
+        ranges.append((t, t2))
+        if t2 >= end:
+            break
+        t = t2 - overlap if overlap > 0 else t2
+    return ranges
+
+
+def safe_unlink(path: Path):
+    try:
+        if path.exists():
+            path.unlink()
+    except Exception:
+        pass
+
+
+def _bucket_index(t, analyzed_duration):
+    if analyzed_duration <= 0:
+        return 0
+    idx = int((t / analyzed_duration) * TIME_BUCKETS)
+    if idx < 0:
+        idx = 0
+    if idx >= TIME_BUCKETS:
+        idx = TIME_BUCKETS - 1
+    return idx
+
+
+def _percentile_rank(values, x):
+    if not values:
+        return 0.0
+    vs = sorted(values)
+    lo, hi = 0, len(vs)
+    while lo < hi:
+        mid = (lo + hi) // 2
+        if vs[mid] <= x:
+            lo = mid + 1
+        else:
+            hi = mid
+    return lo / len(vs)
+
+
+def _pre_score(c, hook_vals, ptm_vals, spk_vals, sil_vals):
+    f = c.get("features", {})
+    p_hook = _percentile_rank(hook_vals, f.get("hook_energy", 0.0))
+    p_ptm = _percentile_rank(ptm_vals, f.get("peak_to_mean", 0.0))
+    p_spk = _percentile_rank(spk_vals, f.get("spike_rate", 0.0))
+    p_sil = _percentile_rank(sil_vals, f.get("silence_ratio", 0.0))
+    return (0.40 * p_hook) + (0.30 * p_ptm) + (0.20 * p_spk) - (0.20 * p_sil)
+
+
+def _light_window(start, end, asr_light_sec, asr_light_offset):
+    dur = max(0.0, end - start)
+    if dur <= asr_light_sec:
+        return start, end
+    s = min(end - 0.1, start + asr_light_offset)
+    e = min(end, s + asr_light_sec)
+    if e - s < 4.0:
+        mid = start + dur * 0.5
+        s = max(start, mid - asr_light_sec * 0.5)
+        e = min(end, s + asr_light_sec)
+    return s, e
+
+
+def run_asr(state: Dict[str, Any]) -> Dict[str, Any]:
+    analyzed_duration = float(state.get("ANALYZED_DURATION", 0.0))
+    asr_topn_per_bucket = int(os.getenv("ASR_TOPN_PER_BUCKET", "4"))
+    asr_model_name = os.getenv("ASR_MODEL_NAME", "tiny")
+    asr_beam_size = int(os.getenv("ASR_BEAM_SIZE", "1"))
+    asr_light_mode = os.getenv("ASR_LIGHT_MODE", "1") == "1"
+    asr_light_sec = float(os.getenv("ASR_LIGHT_SEC", "10.0"))
+    asr_light_offset = float(os.getenv("ASR_LIGHT_OFFSET", "2.0"))
+
+    max_asr_block_sec = float(state.get("MAX_ASR_BLOCK_SEC", 28.0))
+    asr_block_overlap_sec = float(state.get("ASR_BLOCK_OVERLAP_SEC", 0.25))
+    asr_enabled = bool(state.get("ASR_ENABLED", True))
+    asr_language = state.get("ASR_LANGUAGE", "id")
+    ffmpeg_bin = state.get("FFMPEG_BIN", "ffmpeg")
+    cache_dir = Path(state["CACHE_DIR"])
+    art_dir = Path(state["ART_DIR"])
+    audio_wav = Path(state["AUDIO_WAV"])
+    trigger_words = state.get("TRIGGER_WORDS", [])
+
+    with StageTimer(8, "ASR (top-N per bucket, cache, fail-safe)"):
+        transcripts: Dict[str, Any] = {}
+        transcript_cache_path = art_dir / "transcript.json"
+
+        if transcript_cache_path.exists():
+            try:
+                transcripts = read_json(transcript_cache_path) or {}
+                logger.info(
+                    f"Loaded transcript cache: {transcript_cache_path} ({len(transcripts)} items)"
+                )
+            except Exception as e:
+                logger.warning(f"Transcript cache load failed; starting empty. ({e})")
+                transcripts = {}
+
+        asr_available = False
+        model = None
+        if asr_enabled:
+            try:
+                try:
+                    from faster_whisper import WhisperModel
+                except Exception as e:
+                    logger.warning(f"faster-whisper not available ({e}). Trying to install...")
+                    subprocess.run(["pip", "-q", "install", "faster-whisper"], check=True)
+                    from faster_whisper import WhisperModel
+
+                model = WhisperModel(asr_model_name, device="cpu", compute_type="int8")
+                asr_available = True
+                logger.info(f"ASR model ready: faster-whisper {asr_model_name} (cpu int8)")
+            except Exception as e:
+                logger.warning(f"ASR unavailable; continuing without transcript. ({e})")
+                asr_available = False
+
+        def transcribe_candidate_abs(candidate: Dict[str, Any], mode: str = "full") -> Dict[str, Any]:
+            if not asr_available or model is None:
+                return {
+                    "text": "",
+                    "words": [],
+                    "markers_abs": [],
+                    "words_per_sec": 0.0,
+                    "trigger_count": 0,
+                    "word_count": 0,
+                    "mode": mode,
+                }
+
+            cid = candidate["id"]
+            start = float(candidate["start"])
+            end = float(candidate["end"])
+
+            if mode == "light":
+                ls, le = _light_window(start, end, asr_light_sec, asr_light_offset)
+                ranges = split_ranges(ls, le, max_asr_block_sec, asr_block_overlap_sec)
+            else:
+                ranges = split_ranges(start, end, max_asr_block_sec, asr_block_overlap_sec)
+
+            all_words = []
+            full_text = []
+            markers_abs = []
+
+            for bi, (bs, be) in enumerate(ranges, 1):
+                block_wav = cache_dir / f"asrblock_{cid}_{bi:02d}.wav"
+                subprocess.run(
+                    [
+                        ffmpeg_bin,
+                        "-y",
+                        "-loglevel",
+                        "error",
+                        "-ss",
+                        str(bs),
+                        "-t",
+                        str(be - bs),
+                        "-i",
+                        str(audio_wav),
+                        "-ac",
+                        "1",
+                        "-ar",
+                        "16000",
+                        str(block_wav),
+                    ],
+                    check=True,
+                )
+
+                t0 = time.monotonic()
+                logger.info(f"ASR [{cid}] block {bi}/{len(ranges)} START {bs:.2f}-{be:.2f} (mode={mode})")
+                log_flush()
+
+                segments, info = model.transcribe(
+                    str(block_wav), language=asr_language, beam_size=asr_beam_size
+                )
+                for seg in segments:
+                    if seg.text:
+                        full_text.append(seg.text)
+                    for w in (seg.words or []):
+                        all_words.append(
+                            {"word": w.word, "start": float(w.start + bs), "end": float(w.end + bs)}
+                        )
+
+                dt = time.monotonic() - t0
+                logger.info(f"ASR [{cid}] block {bi} DONE in {dt:.2f}s")
+                log_flush()
+
+                safe_unlink(block_wav)
+
+            trigger_set = set([t.lower() for t in (trigger_words or [])])
+            for w in all_words:
+                tok = (w.get("word") or "").strip().lower()
+                if tok in trigger_set:
+                    markers_abs.append(float(w.get("start", 0.0)))
+
+            text = " ".join(full_text).strip()
+            word_count = len(all_words)
+            if mode == "full":
+                dur = max(0.1, float(end - start))
+            else:
+                dur = max(0.1, float(ranges[-1][1] - ranges[0][0]))
+            wps = float(word_count / dur)
+            trigger_count = len(markers_abs)
+
+            return {
+                "text": text,
+                "words": all_words,
+                "markers_abs": markers_abs,
+                "words_per_sec": wps,
+                "trigger_count": trigger_count,
+                "word_count": word_count,
+                "mode": mode,
+            }
+
+        candidates = state.get("CANDIDATES", [])
+        hook_vals = [c.get("features", {}).get("hook_energy", 0.0) for c in candidates]
+        ptm_vals = [c.get("features", {}).get("peak_to_mean", 0.0) for c in candidates]
+        spk_vals = [c.get("features", {}).get("spike_rate", 0.0) for c in candidates]
+        sil_vals = [c.get("features", {}).get("silence_ratio", 0.0) for c in candidates]
+
+        bucket_map = {b: [] for b in range(TIME_BUCKETS)}
+        for c in candidates:
+            b = _bucket_index(float(c.get("start", 0.0)), analyzed_duration)
+            bucket_map[b].append(c)
+
+        top_for_asr = []
+        for b, arr in bucket_map.items():
+            arr_sorted = sorted(
+                arr,
+                key=lambda c: _pre_score(c, hook_vals, ptm_vals, spk_vals, sil_vals),
+                reverse=True,
+            )
+            top_for_asr.extend(arr_sorted[:asr_topn_per_bucket])
+
+        if not asr_available:
+            logger.warning("SEMANTIC_FALLBACK: ASR unavailable")
+        else:
+            logger.info(
+                f"ASR top-N per bucket: {len(top_for_asr)} candidates (mode={'light' if asr_light_mode else 'full'})"
+            )
+
+        for c in top_for_asr:
+            cid = c["id"]
+            existing = transcripts.get(cid, {}) if isinstance(transcripts, dict) else {}
+            if existing.get("text") and existing.get("mode") == "full":
+                out = existing
+            else:
+                try:
+                    mode = "light" if asr_light_mode else "full"
+                    out = transcribe_candidate_abs(c, mode=mode)
+                    transcripts[cid] = out
+                except Exception as e:
+                    logger.warning(f"ASR failed for {cid}: {e}")
+                    out = {
+                        "text": "",
+                        "words": [],
+                        "markers_abs": [],
+                        "words_per_sec": 0.0,
+                        "trigger_count": 0,
+                        "word_count": 0,
+                        "mode": "light",
+                    }
+                    transcripts[cid] = out
+
+            f = c.get("features", {})
+            f["words_per_sec"] = float(out.get("words_per_sec", 0.0))
+            f["trigger_count"] = int(out.get("trigger_count", 0))
+            f["markers_abs"] = list(out.get("markers_abs", []))
+            f["word_count"] = int(out.get("word_count", 0))
+            f["has_text"] = True if (out.get("text") or "").strip() else False
+            c["features"] = f
+
+        try:
+            write_json(transcript_cache_path, transcripts)
+            logger.info(f"Saved transcript cache (entries={len(transcripts)})")
+        except Exception as e:
+            logger.warning(f"Failed to save transcript cache: {e}")
+
+        state["TRANSCRIPTS"] = transcripts
+        state["ASR_AVAILABLE"] = asr_available
+        state["transcribe_candidate_abs"] = transcribe_candidate_abs
+
+    return state

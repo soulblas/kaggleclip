@@ -1,0 +1,239 @@
+from __future__ import annotations
+
+import csv
+import subprocess
+from pathlib import Path
+from typing import Any, Dict, List
+
+from .io_utils import write_json
+from .logging_utils import StageTimer, log_flush
+
+
+def ensure_outdir(out_dir: str | Path) -> Path:
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    return out_dir
+
+
+def write_agent_meta(out_dir: str | Path, agent: Dict[str, Any]) -> Path:
+    out_dir = Path(out_dir)
+    path = out_dir / "agent_meta.json"
+    write_json(path, agent)
+    return path
+
+
+def run_cmd(cmd: List[str], check: bool = True) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        check=check,
+    )
+
+
+def _portrait_vf_nozoom(export_w: int, export_h: int) -> str:
+    return (
+        f"scale={export_w}:{export_h}:force_original_aspect_ratio=decrease,"
+        f"pad={export_w}:{export_h}:(ow-iw)/2:(oh-ih)/2,"
+        f"setsar=1"
+    )
+
+
+def export_clip(
+    video_path: Path,
+    out_path: Path,
+    start: float,
+    end: float,
+    export_w: int,
+    export_h: int,
+    fps_export: int,
+    audio_bitrate: str,
+) -> None:
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    cmd = [
+        "ffmpeg",
+        "-y",
+        "-ss",
+        f"{start:.3f}",
+        "-to",
+        f"{end:.3f}",
+        "-i",
+        str(video_path),
+        "-vf",
+        _portrait_vf_nozoom(export_w, export_h),
+        "-r",
+        str(fps_export),
+        "-c:v",
+        "libx264",
+        "-preset",
+        "veryfast",
+        "-crf",
+        "20",
+        "-pix_fmt",
+        "yuv420p",
+        "-c:a",
+        "aac",
+        "-b:a",
+        audio_bitrate,
+        "-movflags",
+        "+faststart",
+        str(out_path),
+    ]
+    run_cmd(cmd, check=True)
+
+
+def _ffprobe_duration(ffprobe_bin: str, path: Path) -> float:
+    try:
+        out = subprocess.check_output(
+            [
+                ffprobe_bin,
+                "-v",
+                "error",
+                "-show_entries",
+                "format=duration",
+                "-of",
+                "default=noprint_wrappers=1:nokey=1",
+                str(path),
+            ]
+        ).decode("utf-8").strip()
+        return float(out)
+    except Exception:
+        return -1.0
+
+
+def _validate_clip_file(ffprobe_bin: str, path: Path, expected_dur: float, tol: float = 1.2) -> None:
+    assert path.exists(), f"Missing clip file: {path}"
+    size = path.stat().st_size
+    assert size > 50_000, f"Clip too small / likely failed: {path} ({size} bytes)"
+    dur = _ffprobe_duration(ffprobe_bin, path)
+    assert dur > 0, f"ffprobe duration failed: {path}"
+    assert abs(dur - expected_dur) <= tol, (
+        f"Bad duration {dur:.2f}s (expected ~{expected_dur:.2f}s) for {path}"
+    )
+
+
+def export_thumb(video_path: Path, out_path: Path, t: float, export_w: int, export_h: int) -> None:
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    cmd = [
+        "ffmpeg",
+        "-y",
+        "-ss",
+        f"{t:.3f}",
+        "-i",
+        str(video_path),
+        "-vf",
+        _portrait_vf_nozoom(export_w, export_h),
+        "-vframes",
+        "1",
+        "-q:v",
+        "2",
+        str(out_path),
+    ]
+    run_cmd(cmd, check=True)
+
+
+def run_export(state: Dict[str, Any]) -> Dict[str, Any]:
+    export_w = int(state.get("EXPORT_W", 1080))
+    export_h = int(state.get("EXPORT_H", 1920))
+    fps_export = int(state.get("FPS_EXPORT", state.get("EXPORT_FPS", 30)))
+    audio_bitrate = state.get("AUDIO_BITRATE", "160k")
+
+    video_path = Path(state["VIDEO_PATH"])
+    clips_dir = Path(state["CLIPS_DIR"])
+    thumbs_dir = Path(state["THUMBS_DIR"])
+    out_dir = Path(state["OUT_DIR"])
+    public_clips_dir = state.get("PUBLIC_CLIPS_DIR")
+    public_thumbs_dir = state.get("PUBLIC_THUMBS_DIR")
+    ffprobe_bin = state.get("FFPROBE_BIN", "ffprobe")
+
+    with StageTimer(
+        12,
+        f"Finalize + Export (NO ZOOM pad {export_w}x{export_h}@{fps_export}) + Thumbs + Ranking",
+    ):
+        assert "SELECTED" in state and isinstance(state["SELECTED"], list), "SELECTED missing"
+
+        clips_dir.mkdir(parents=True, exist_ok=True)
+        thumbs_dir.mkdir(parents=True, exist_ok=True)
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+        for p in clips_dir.glob("*.mp4"):
+            p.unlink()
+        for p in thumbs_dir.glob("*.jpg"):
+            p.unlink()
+
+        ranking_rows = []
+        for rank, c in enumerate(state["SELECTED"], 1):
+            cid = str(c.get("id"))
+            st = float(c.get("start", 0.0))
+            en = float(c.get("end", st))
+            dur = float(c.get("duration", en - st))
+            vs = float((c.get("scores", {}) or {}).get("viral_score", 0.0))
+
+            clip_out = clips_dir / f"clip_{rank:02d}_{cid}.mp4"
+            thumb_out = thumbs_dir / f"thumb_{rank:02d}_{cid}.jpg"
+
+            export_clip(video_path, clip_out, st, en, export_w, export_h, fps_export, audio_bitrate)
+            _validate_clip_file(ffprobe_bin, clip_out, expected_dur=(en - st))
+
+            if public_clips_dir:
+                try:
+                    public_clips_dir = Path(public_clips_dir)
+                    public_clips_dir.mkdir(parents=True, exist_ok=True)
+                    public_clip = public_clips_dir / clip_out.name
+                    if public_clip.exists():
+                        public_clip.unlink()
+                    public_clip.write_bytes(clip_out.read_bytes())
+                except Exception:
+                    pass
+
+            t_thumb = st + min(0.5, max(0.0, dur * 0.10))
+            export_thumb(video_path, thumb_out, t_thumb, export_w, export_h)
+            if public_thumbs_dir:
+                try:
+                    public_thumbs_dir = Path(public_thumbs_dir)
+                    public_thumbs_dir.mkdir(parents=True, exist_ok=True)
+                    public_thumb = public_thumbs_dir / thumb_out.name
+                    if public_thumb.exists():
+                        public_thumb.unlink()
+                    public_thumb.write_bytes(thumb_out.read_bytes())
+                except Exception:
+                    pass
+
+            er = c.get("editorial_reason", [])
+            er = " | ".join(er) if isinstance(er, list) else str(er)
+
+            ranking_rows.append(
+                {
+                    "rank": int(rank),
+                    "id": cid,
+                    "start": float(st),
+                    "end": float(en),
+                    "duration": float(dur),
+                    "viral_score": float(vs),
+                    "clip_path": str(clip_out),
+                    "thumbnail_path": str(thumb_out),
+                    "editorial_reason": er,
+                }
+            )
+
+        ranking_csv = out_dir / "selected_ranking.csv"
+        with ranking_csv.open("w", newline="", encoding="utf-8") as f:
+            fieldnames = [
+                "rank",
+                "id",
+                "start",
+                "end",
+                "duration",
+                "viral_score",
+                "clip_path",
+                "thumbnail_path",
+                "editorial_reason",
+            ]
+            w = csv.DictWriter(f, fieldnames=fieldnames)
+            w.writeheader()
+            w.writerows(ranking_rows)
+
+        log_flush()
+
+    return state
