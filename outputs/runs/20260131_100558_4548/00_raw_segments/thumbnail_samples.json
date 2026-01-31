@@ -1,0 +1,22 @@
+{
+  "timestamps": [
+    3.770370333333333,
+    7.540740666666666,
+    11.311110999999999,
+    15.081481333333333,
+    18.851851666666665,
+    22.622221999999997,
+    26.39259233333333,
+    30.162962666666665
+  ],
+  "paths": [
+    "outputs\\runs\\20260131_100558_4548\\03_thumbnails\\sample_01_3.77.jpg",
+    "outputs\\runs\\20260131_100558_4548\\03_thumbnails\\sample_02_7.54.jpg",
+    "outputs\\runs\\20260131_100558_4548\\03_thumbnails\\sample_03_11.31.jpg",
+    "outputs\\runs\\20260131_100558_4548\\03_thumbnails\\sample_04_15.08.jpg",
+    "outputs\\runs\\20260131_100558_4548\\03_thumbnails\\sample_05_18.85.jpg",
+    "outputs\\runs\\20260131_100558_4548\\03_thumbnails\\sample_06_22.62.jpg",
+    "outputs\\runs\\20260131_100558_4548\\03_thumbnails\\sample_07_26.39.jpg",
+    "outputs\\runs\\20260131_100558_4548\\03_thumbnails\\sample_08_30.16.jpg"
+  ]
+}

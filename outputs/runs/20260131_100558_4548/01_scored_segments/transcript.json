@@ -1,0 +1,67 @@
+{
+  "abde2ee27b66ca4478f261d8642a6e6c2701a09b4a3932a4de5db9266f5137a9:0.00-33.93:tiny|1|True|12.0|2.0|id": {
+    "text": "Mbak, mbakar.  Baka dia waktu japel, yakin aja.  Ayo, orang tua istrinya tuh gak yakin.  Tapi kamu pasti dia di aja, gua mulut.  Kari ist nih, nanti kita banget.  Bagaimana?  Raja, dastein perna, bawah jubir waktu di tolak mertua.  Buka di tolak banget, kita mau bilang nih.  Waktor menggambah.  Karena kita ga bisa ngomong, ini apa-nya mes roto-system.  Iya  Terusis teman  Terut-ternut lebih sad  Lu bahwa siapa?",
+    "words": [],
+    "markers_abs": [],
+    "words_per_sec": 0.0,
+    "trigger_count": 0,
+    "word_count": 0,
+    "mode": "full",
+    "id": "cand_0001",
+    "start": 0.0,
+    "end": 33.933333,
+    "video_hash": "abde2ee27b66ca4478f261d8642a6e6c2701a09b4a3932a4de5db9266f5137a9"
+  },
+  "abde2ee27b66ca4478f261d8642a6e6c2701a09b4a3932a4de5db9266f5137a9:12.82-33.93:tiny|1|True|12.0|2.0|id": {
+    "text": "penah bawah jubir waktu di tolak mertua.  Buka di tolak bangunas kita mau bilang nih.  Waktu mau ngelamar, karena kita ga bisa ngomong, ini apa-apa?",
+    "words": [],
+    "markers_abs": [],
+    "words_per_sec": 0.0,
+    "trigger_count": 0,
+    "word_count": 0,
+    "mode": "light",
+    "id": "cand_0039",
+    "start": 12.82,
+    "end": 33.933333,
+    "video_hash": "abde2ee27b66ca4478f261d8642a6e6c2701a09b4a3932a4de5db9266f5137a9"
+  },
+  "abde2ee27b66ca4478f261d8642a6e6c2701a09b4a3932a4de5db9266f5137a9:12.10-33.93:tiny|1|True|12.0|2.0|id": {
+    "text": "Dastin pernah bahwa jubir waktu di tolak mertua.  Buka di tolak bangun, kan kita mau dilani.  Iya.  Wak tahu mengalaman.  Karena kita ga bisa lomong, ini apa-apa.",
+    "words": [],
+    "markers_abs": [],
+    "words_per_sec": 0.0,
+    "trigger_count": 0,
+    "word_count": 0,
+    "mode": "light",
+    "id": "cand_0038",
+    "start": 12.100000000000001,
+    "end": 33.933333,
+    "video_hash": "abde2ee27b66ca4478f261d8642a6e6c2701a09b4a3932a4de5db9266f5137a9"
+  },
+  "abde2ee27b66ca4478f261d8642a6e6c2701a09b4a3932a4de5db9266f5137a9:12.00-33.93:tiny|1|True|12.0|2.0|id": {
+    "text": "Dastien pernah bahwa jubir waktu di tolak mertua.  Buka di tolak bangun, kan kita mau dilani.  Iya.  Wak tahu mengalaman.  Karena kita ga bisa lomong, ini apa-apa.",
+    "words": [],
+    "markers_abs": [],
+    "words_per_sec": 0.0,
+    "trigger_count": 0,
+    "word_count": 0,
+    "mode": "light",
+    "id": "cand_0003",
+    "start": 12.0,
+    "end": 33.933333,
+    "video_hash": "abde2ee27b66ca4478f261d8642a6e6c2701a09b4a3932a4de5db9266f5137a9"
+  },
+  "abde2ee27b66ca4478f261d8642a6e6c2701a09b4a3932a4de5db9266f5137a9:18.00-33.93:tiny|1|True|12.0|2.0|id": {
+    "text": "...bisa kita mau berilani.  Waktu mau laman.  Karena kita ga bisa lomong...  ...inni apagian me, serot sistem.  Ya.  Terus sistem.  Terut. Terut.",
+    "words": [],
+    "markers_abs": [],
+    "words_per_sec": 0.0,
+    "trigger_count": 0,
+    "word_count": 0,
+    "mode": "light",
+    "id": "cand_0004",
+    "start": 18.0,
+    "end": 33.933333,
+    "video_hash": "abde2ee27b66ca4478f261d8642a6e6c2701a09b4a3932a4de5db9266f5137a9"
+  }
+}

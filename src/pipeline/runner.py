@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import random
+import shutil
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -16,7 +17,15 @@ from .candidates import run_candidate_mining, run_context_expansion, add_marker_
 from .export import ensure_outdir, run_export, write_agent_meta
 from .features import run_feature_extraction
 from .io_utils import write_json, load_cached_json, write_cache_meta, resolve_output_paths, stable_hash
-from .logging_utils import StageTimer, log_flush, setup_pipeline_logger, log_i, log_ok, log_warn
+from .logging_utils import (
+    StageTimer,
+    log_flush,
+    setup_pipeline_logger,
+    log_i,
+    log_ok,
+    log_warn,
+    log_warning_panel,
+)
 from .scoring import run_scoring
 from .segmentation import run_segmentation
 from .selection import run_selection, snap_selected
@@ -61,12 +70,20 @@ def run_pipeline(input_video: str, out_dir: str = "outputs", **kwargs):
     except Exception:
         pass
 
+    def _truthy(val: Any) -> bool:
+        if isinstance(val, bool):
+            return val
+        if val is None:
+            return False
+        return str(val).strip().lower() not in ("0", "false", "no", "off")
+
     run_ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
     run_suffix = f"{os.getpid() % 10000:04d}"
     run_id = f"{run_ts}_{run_suffix}"
 
     out_dir_path = ensure_outdir(out_dir)
-    run_dir = Path(out_dir_path) / "runs" / run_id
+    run_scoped = _truthy(kwargs.get("run_scoped", os.getenv("RUN_SCOPED_OUTPUT", "1")))
+    run_dir = Path(out_dir_path) / "runs" / run_id if run_scoped else Path(out_dir_path)
     output_paths = resolve_output_paths(run_dir)
 
     agent = load_agent_contract("AGENTS.md")
@@ -137,11 +154,13 @@ def run_pipeline(input_video: str, out_dir: str = "outputs", **kwargs):
         "sumpah",
     ]
 
-    state["FFMPEG_BIN"] = "ffmpeg"
-    state["FFPROBE_BIN"] = "ffprobe"
+    state["FFMPEG_BIN"] = kwargs.get("ffmpeg_bin", os.getenv("FFMPEG_BIN", "ffmpeg"))
+    state["FFPROBE_BIN"] = kwargs.get("ffprobe_bin", os.getenv("FFPROBE_BIN", "ffprobe"))
 
     state["RUN_TIMESTAMP"] = run_ts
     state["RUN_ID"] = run_id
+    state["RUN_SCOPED_OUTPUT"] = run_scoped
+    state["BASE_OUT_DIR"] = str(out_dir_path)
     state["SEED"] = seed
     state["TIME_BUCKETS"] = 5
     state["OUTPUT_PATHS"] = output_paths
@@ -165,6 +184,7 @@ def run_pipeline(input_video: str, out_dir: str = "outputs", **kwargs):
     state["SNAP_SILENCE_RADIUS"] = float(kwargs.get("snap_silence_radius", 1.2))
 
     env_keys = [
+        "RUN_SCOPED_OUTPUT",
         "USE_FLEXIBLE_DUR",
         "MIN_DUR_SEC",
         "MAX_DUR_SEC",
@@ -184,6 +204,8 @@ def run_pipeline(input_video: str, out_dir: str = "outputs", **kwargs):
         "ASR_LIGHT_MODE",
         "ASR_LIGHT_SEC",
         "ASR_LIGHT_OFFSET",
+        "FFMPEG_BIN",
+        "FFPROBE_BIN",
     ]
     env_overrides = {k: os.getenv(k) for k in env_keys if os.getenv(k) is not None}
     state["ENV_OVERRIDES"] = env_overrides
@@ -194,6 +216,9 @@ def run_pipeline(input_video: str, out_dir: str = "outputs", **kwargs):
         "EXPORT_FPS": state["EXPORT_FPS"],
         "AUDIO_BITRATE": state["AUDIO_BITRATE"],
         "EXPORT_MODE": state["EXPORT_MODE"],
+        "RUN_SCOPED_OUTPUT": state["RUN_SCOPED_OUTPUT"],
+        "FFMPEG_BIN": state["FFMPEG_BIN"],
+        "FFPROBE_BIN": state["FFPROBE_BIN"],
         "MIN_CLIP_SEC": state["MIN_CLIP_SEC"],
         "MAX_CLIP_SEC": state["MAX_CLIP_SEC"],
         "HOOK_WINDOW_SEC": state["HOOK_WINDOW_SEC"],
@@ -232,6 +257,8 @@ def run_pipeline(input_video: str, out_dir: str = "outputs", **kwargs):
         "config_snapshot": config_snapshot,
         "env_overrides": env_overrides,
         "agent": agent,
+        "run_scoped_output": run_scoped,
+        "base_out_dir": str(out_dir_path),
         "output_paths": {k: str(v) for k, v in output_paths.items()},
     }
     state["RUN_MANIFEST"] = run_manifest
@@ -239,6 +266,18 @@ def run_pipeline(input_video: str, out_dir: str = "outputs", **kwargs):
     state["RUN_COMPLETE_PATH"] = Path(state["METADATA_DIR"]) / "run_complete.json"
 
     with StageTimer(0, "Initialization"):
+        def _clear_dir_contents(path: Path) -> None:
+            if not path.exists():
+                return
+            for child in path.iterdir():
+                try:
+                    if child.is_dir():
+                        shutil.rmtree(child)
+                    else:
+                        child.unlink()
+                except Exception:
+                    pass
+
         def _bin_version(bin_name: str) -> str:
             try:
                 out = subprocess.check_output([bin_name, "-version"], stderr=subprocess.STDOUT).decode("utf-8")
@@ -272,6 +311,16 @@ def run_pipeline(input_video: str, out_dir: str = "outputs", **kwargs):
             log_i(logger, f"ENV_OVERRIDES: {env_overrides}")
         log_i(logger, f"VERSIONS: {versions}")
         log_i(logger, f"LOG_FILE: {log_file}")
+        if not run_scoped:
+            log_warn(logger, "RUN_SCOPED_OUTPUT=0: clearing base output stage dirs to avoid mixed runs")
+            for p in (
+                output_paths["raw_segments_dir"],
+                output_paths["scored_segments_dir"],
+                output_paths["selected_clips_dir"],
+                output_paths["thumbnails_dir"],
+                output_paths["metadata_dir"],
+            ):
+                _clear_dir_contents(p)
         log_flush()
 
     with StageTimer(1, "Ingest Video"):
@@ -406,6 +455,8 @@ def run_pipeline(input_video: str, out_dir: str = "outputs", **kwargs):
     snap_selected(state)
     run_export(state)
 
+    log_warning_panel(logger)
+
     run_manifest = state.get("RUN_MANIFEST", {})
     run_manifest["status"] = "complete"
     run_manifest["selected_count"] = len(state.get("SELECTED", []))
@@ -423,5 +474,6 @@ def run_pipeline(input_video: str, out_dir: str = "outputs", **kwargs):
     log_ok(logger, f"Artifacts: {Path(state['METADATA_DIR']) / 'selection_audit.json'}")
     log_ok(logger, f"Artifacts: {Path(state['METADATA_DIR']) / 'selected.json'}")
     log_ok(logger, f"Artifacts: {Path(state['METADATA_DIR']) / 'ranking.csv'}")
+    log_ok(logger, f"Artifacts: {Path(state['METADATA_DIR']) / 'export_manifest.json'}")
 
     return {"status": "ok", "out_dir": str(run_dir), "agent": agent}

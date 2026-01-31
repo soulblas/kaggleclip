@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import csv
+import logging
 import subprocess
 from pathlib import Path
 from typing import Any, Dict, List
 
 from .io_utils import write_json
-from .logging_utils import StageTimer, log_flush
+from .logging_utils import StageTimer, log_flush, log_ok, log_warn, log_err
+
+logger = logging.getLogger("viralshort")
 
 
 def ensure_outdir(out_dir: str | Path) -> Path:
@@ -50,7 +53,7 @@ def export_clip(
     fps_export: int,
     audio_bitrate: str,
     ffmpeg_bin: str,
-) -> None:
+) -> subprocess.CompletedProcess:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     cmd = [
         ffmpeg_bin,
@@ -81,7 +84,7 @@ def export_clip(
         "+faststart",
         str(out_path),
     ]
-    run_cmd(cmd, check=True)
+    return run_cmd(cmd, check=False)
 
 
 def _ffprobe_duration(ffprobe_bin: str, path: Path) -> float:
@@ -165,6 +168,8 @@ def run_export(state: Dict[str, Any]) -> Dict[str, Any]:
             p.unlink()
 
         ranking_rows = []
+        export_manifest = []
+        expected_files = []
         for rank, c in enumerate(state["SELECTED"], 1):
             cid = str(c.get("id"))
             st = float(c.get("start", 0.0))
@@ -175,7 +180,7 @@ def run_export(state: Dict[str, Any]) -> Dict[str, Any]:
             clip_out = clips_dir / f"clip_{rank:02d}_{cid}.mp4"
             thumb_out = thumbs_dir / f"thumb_{rank:02d}_{cid}.jpg"
 
-            export_clip(
+            proc = export_clip(
                 video_path,
                 clip_out,
                 st,
@@ -186,10 +191,28 @@ def run_export(state: Dict[str, Any]) -> Dict[str, Any]:
                 audio_bitrate,
                 ffmpeg_bin,
             )
+            expected_files.append(clip_out)
+            if proc.returncode != 0:
+                out = (proc.stdout or "").strip()
+                snippet = out[-400:] if out else ""
+                log_err(
+                    logger,
+                    f"EXPORT_FAIL id={cid} rc={proc.returncode} stderr_snip={snippet}",
+                )
+                raise RuntimeError(f"ffmpeg export failed for {cid} (rc={proc.returncode})")
+
             _validate_clip_file(ffprobe_bin, clip_out, expected_dur=(en - st))
+            size_kb = max(1, int(clip_out.stat().st_size / 1024))
+            log_ok(
+                logger,
+                f"EXPORT clip_{rank:02d} id={cid} start={st:.2f} end={en:.2f} dur={dur:.2f} -> {clip_out} size={size_kb}KB",
+            )
 
             t_thumb = st + min(0.5, max(0.0, dur * 0.10))
-            export_thumb(video_path, thumb_out, t_thumb, export_w, export_h, ffmpeg_bin)
+            try:
+                export_thumb(video_path, thumb_out, t_thumb, export_w, export_h, ffmpeg_bin)
+            except Exception as e:
+                log_warn(logger, f"EXPORT_THUMB_FAIL id={cid} err={e}")
 
             er = c.get("editorial_reason", [])
             er = " | ".join(er) if isinstance(er, list) else str(er)
@@ -205,6 +228,19 @@ def run_export(state: Dict[str, Any]) -> Dict[str, Any]:
                     "clip_path": str(clip_out),
                     "thumbnail_path": str(thumb_out),
                     "editorial_reason": er,
+                }
+            )
+            export_manifest.append(
+                {
+                    "rank": int(rank),
+                    "id": cid,
+                    "start": float(st),
+                    "end": float(en),
+                    "duration": float(dur),
+                    "clip_path": str(clip_out),
+                    "thumbnail_path": str(thumb_out),
+                    "size_bytes": int(clip_out.stat().st_size),
+                    "validated_duration_sec": float(_ffprobe_duration(ffprobe_bin, clip_out)),
                 }
             )
 
@@ -224,6 +260,17 @@ def run_export(state: Dict[str, Any]) -> Dict[str, Any]:
             w = csv.DictWriter(f, fieldnames=fieldnames)
             w.writeheader()
             w.writerows(ranking_rows)
+
+        manifest_path = metadata_dir / "export_manifest.json"
+        write_json(manifest_path, export_manifest)
+
+        selected_count = len(state.get("SELECTED", []))
+        mp4_files = list(clips_dir.glob("*.mp4"))
+        if selected_count > 0 and len(mp4_files) == 0:
+            raise RuntimeError("Export failed: zero mp4 files produced")
+        if len(mp4_files) < selected_count:
+            missing = [p for p in expected_files if not p.exists()]
+            raise RuntimeError(f"Export incomplete: missing clips: {[str(p) for p in missing]}")
 
         log_flush()
 

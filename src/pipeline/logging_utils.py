@@ -1,4 +1,5 @@
 from __future__ import annotations
+
 from pathlib import Path
 import json
 import logging
@@ -6,6 +7,7 @@ import os
 import sys
 import time
 from datetime import datetime, timezone
+
 
 class StageLogger:
     def __init__(self, log_file: Path):
@@ -29,13 +31,13 @@ def _use_unicode() -> bool:
 
 def _stage_header(stage_id: int, name: str) -> str:
     if _use_unicode():
-        return f"┏━ STAGE {stage_id:02d}: {name}"
+        return f"\u250f\u2501 STAGE {stage_id:02d}: {name}"
     return f"=== STAGE {stage_id:02d}: {name} ==="
 
 
 def _stage_footer(stage_id: int, name: str, elapsed_sec: float, ok: bool = True, err: str | None = None) -> str:
     if _use_unicode():
-        prefix = "┗━ END" if ok else "┗━ FAIL"
+        prefix = "\u2517\u2501 END" if ok else "\u2517\u2501 FAIL"
         tail = f"(elapsed={elapsed_sec:.2f}s)"
         if err:
             tail += f" | {err}"
@@ -47,16 +49,25 @@ def _stage_footer(stage_id: int, name: str, elapsed_sec: float, ok: bool = True,
     return f"=== {status} STAGE {stage_id:02d}: {name} {tail} ==="
 
 
+_WARNINGS: list[str] = []
+
+
+def _ok_tag() -> str:
+    return "[\u2713]" if _use_unicode() else "[OK]"
+
+
 def log_i(logger: logging.Logger, msg: str) -> None:
     logger.info(f"[i] {msg}")
 
 
 def log_ok(logger: logging.Logger, msg: str) -> None:
-    logger.info(f"[✓] {msg}")
+    logger.info(f"{_ok_tag()} {msg}")
 
 
 def log_warn(logger: logging.Logger, msg: str) -> None:
     logger.warning(f"[!] {msg}")
+    if msg not in _WARNINGS:
+        _WARNINGS.append(msg)
 
 
 def log_err(logger: logging.Logger, msg: str) -> None:
@@ -95,6 +106,14 @@ def log_duration_hist(logger: logging.Logger, durations: list[float]) -> None:
     if other:
         items.append(("dur_other", other))
     log_bar_chart(logger, "duration_hist", items)
+
+
+def log_warning_panel(logger: logging.Logger, limit: int = 20) -> None:
+    if not _WARNINGS:
+        return
+    logger.warning(f"[!] WARNING SUMMARY ({len(_WARNINGS)})")
+    for i, msg in enumerate(_WARNINGS[:limit], 1):
+        logger.warning(f"    {i:02d}. {msg}")
 
 
 def log_flush(logger: logging.Logger | None = None) -> None:
@@ -142,7 +161,7 @@ def setup_pipeline_logger(log_file: Path) -> logging.Logger:
     fmt = logging.Formatter("%(asctime)s | %(levelname)s | %(message)s")
     log_file.parent.mkdir(parents=True, exist_ok=True)
 
-    fh = logging.FileHandler(log_file, encoding="utf-8")
+    fh = logging.FileHandler(log_file, mode="w", encoding="utf-8")
     fh.setLevel(logging.INFO)
     fh.setFormatter(fmt)
 

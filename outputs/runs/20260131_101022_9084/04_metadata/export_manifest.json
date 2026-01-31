@@ -1,0 +1,13 @@
+[
+  {
+    "rank": 1,
+    "id": "cand_0001",
+    "start": 0.0,
+    "end": 33.933333,
+    "duration": 33.933333,
+    "clip_path": "outputs\\runs\\20260131_101022_9084\\02_selected_clips\\clip_01_cand_0001.mp4",
+    "thumbnail_path": "outputs\\runs\\20260131_101022_9084\\03_thumbnails\\thumb_01_cand_0001.jpg",
+    "size_bytes": 6475047,
+    "validated_duration_sec": 33.933008
+  }
+]

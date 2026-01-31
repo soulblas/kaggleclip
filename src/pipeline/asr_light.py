@@ -118,20 +118,27 @@ def run_asr(state: Dict[str, Any]) -> Dict[str, Any]:
 
         asr_available = False
         model = None
+        max_retries = int(state.get("ASR_MODEL_MAX_RETRIES", 1))
         if asr_enabled:
-            try:
+            for attempt in range(max_retries + 1):
                 try:
-                    from faster_whisper import WhisperModel
-                except Exception as e:
-                    logger.warning(f"faster-whisper not available ({e}).")
-                    raise
+                    try:
+                        from faster_whisper import WhisperModel
+                    except Exception as e:
+                        logger.warning(f"faster-whisper not available ({e}).")
+                        raise
 
-                model = WhisperModel(asr_model_name, device="cpu", compute_type="int8")
-                asr_available = True
-                logger.info(f"ASR model ready: faster-whisper {asr_model_name} (cpu int8)")
-            except Exception as e:
-                logger.warning(f"ASR unavailable; continuing without transcript. ({e})")
-                asr_available = False
+                    model = WhisperModel(asr_model_name, device="cpu", compute_type="int8")
+                    asr_available = True
+                    logger.info(f"ASR model ready: faster-whisper {asr_model_name} (cpu int8)")
+                    break
+                except Exception as e:
+                    if attempt < max_retries:
+                        logger.warning(f"ASR init failed (attempt {attempt+1}/{max_retries+1}): {e}")
+                        time.sleep(0.2)
+                    else:
+                        logger.warning(f"ASR unavailable; continuing without transcript. ({e})")
+                        asr_available = False
 
         def transcribe_candidate_abs(candidate: Dict[str, Any], mode: str = "full") -> Dict[str, Any]:
             if not asr_available or model is None:
