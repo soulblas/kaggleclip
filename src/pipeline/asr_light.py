@@ -305,8 +305,42 @@ def run_asr(state: Dict[str, Any]) -> Dict[str, Any]:
             f["trigger_count"] = int(out.get("trigger_count", 0))
             f["markers_abs"] = list(out.get("markers_abs", []))
             f["word_count"] = int(out.get("word_count", 0))
-            f["has_text"] = True if (out.get("text") or "").strip() else False
+            # Mark has_text only if there are words (word_count > 0)
+            f["has_text"] = True if int(out.get("word_count", 0)) > 0 else False
             c["features"] = f
+
+        # Ensure every candidate has ASR feature fields populated (Clause E)
+        # Candidates outside top_for_asr may not have been transcribed; set defaults
+        try:
+            all_candidates = state.get("CANDIDATES", [])
+            for cand in all_candidates:
+                cid2 = cand.get("id")
+                # if transcript missing, set dummy entry and zero-valued features
+                if cid2 not in transcripts_by_id:
+                    # create empty transcript entry
+                    transcripts_by_id[cid2] = {
+                        "id": cid2,
+                        "start": float(cand.get("start", 0.0)),
+                        "end": float(cand.get("end", 0.0)),
+                        "video_hash": (state.get("VIDEO_HASH") or "").strip(),
+                        "text": "",
+                        "words": [],
+                        "markers_abs": [],
+                        "words_per_sec": 0.0,
+                        "trigger_count": 0,
+                        "word_count": 0,
+                        "mode": "light",
+                    }
+                f2 = cand.get("features", {}) or {}
+                # assign default feature values if not present
+                f2.setdefault("words_per_sec", 0.0)
+                f2.setdefault("word_count", 0)
+                f2.setdefault("trigger_count", 0)
+                f2.setdefault("markers_abs", [])
+                f2.setdefault("has_text", False)
+                cand["features"] = f2
+        except Exception:
+            pass
 
         try:
             write_json(transcript_cache_path, transcript_cache)

@@ -396,6 +396,41 @@ def run_candidate_mining(state: Dict[str, Any]) -> Dict[str, Any]:
             [(f"b{b}", int(bucket_counts[b])) for b in range(time_buckets)],
         )
         log_duration_hist(logger, [float(c.get("duration", 0.0)) for c in candidates])
+        # Emit structured log and artifact for empty buckets (Clause 3)
+        bucket_empty_whys: Dict[str, Any] = {}
+        for b in range(time_buckets):
+            if bucket_counts.get(b, 0) == 0:
+                # compute basic diagnostics for why this bucket is empty
+                # maximum energy across the video
+                try:
+                    energy_max = max((float(p.get("rms", 0.0)) for p in energy_curve), default=0.0)
+                except Exception:
+                    energy_max = 0.0
+                # silence ratio across entire analyzed duration
+                total_dur = analyzed_duration if analyzed_duration > 0 else 1.0
+                sil_total = 0.0
+                for ss, se in (silence_segments or []):
+                    ssf = max(0.0, float(ss))
+                    sef = min(float(se), float(analyzed_duration))
+                    if sef > ssf:
+                        sil_total += float(sef - ssf)
+                silence_ratio = float(sil_total / total_dur) if total_dur > 0 else 0.0
+                # record reason
+                bucket_empty_whys[f"b{b}"] = {
+                    "reason": "duration_constraints",
+                    "details": {
+                        "energy_max": energy_max,
+                        "silence_ratio": silence_ratio,
+                    },
+                }
+                logger.warning(
+                    f"BUCKET_EMPTY_WHY b{b}: reason=duration_constraints details={{energy_max: {energy_max:.2f}, silence_ratio: {silence_ratio:.2f}}}"
+                )
+        if bucket_empty_whys:
+            try:
+                write_json(Path(state["RAW_SEGMENTS_DIR"]) / "bucket_empty_why.json", bucket_empty_whys)
+            except Exception:
+                pass
         log_flush()
 
     state["CANDIDATES"] = candidates

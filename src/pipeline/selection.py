@@ -13,6 +13,35 @@ logger = logging.getLogger("viralshort")
 
 TIME_BUCKETS = 5
 
+# Normalize end_reason to allowed enumeration (Clause 9)
+_ALLOWED_END_REASONS = {
+    "IDEA_COMPLETE",
+    "LONG_PAUSE",
+    "TOPIC_SHIFT",
+    "DENSITY_DROP",
+    "HARDCAP_FALLBACK",
+}
+
+def _normalize_end_reason(end_reason: str) -> str:
+    """Map internal end_reason strings to allowed enums."""
+    if not end_reason:
+        return "IDEA_COMPLETE"
+    s = str(end_reason).lower()
+    # Hard cap or fixed endings -> HARDCAP_FALLBACK
+    if "hardcap" in s or "hard_end" in s or "fixed" in s or "video_short" in s or "clamp" in s:
+        return "HARDCAP_FALLBACK"
+    # Silence or pause trimmed -> LONG_PAUSE
+    if "silence" in s or "pause" in s or "trim" in s:
+        return "LONG_PAUSE"
+    # Block/topic shift indicators
+    if "block" in s or "topic" in s:
+        return "TOPIC_SHIFT"
+    # Density drop or energy fallback
+    if "density" in s or "energy" in s:
+        return "DENSITY_DROP"
+    # Default to IDEA_COMPLETE for context expansion or end-of-idea
+    return "IDEA_COMPLETE"
+
 
 def overlaps(a_start, a_end, b_start, b_end, gap):
     return not (a_end + gap <= b_start or b_end + gap <= a_start)
@@ -141,7 +170,16 @@ def run_selection(state: Dict[str, Any]) -> Dict[str, Any]:
             rec["phase"] = phase
             rec["reason"] = reason
             rec["reason_codes"] = list(dict.fromkeys([str(x) for x in (reason_codes or [])]))
-            rec["score_snapshot"] = score_snapshot(c)
+            # capture current score snapshot and semantics
+            snap = score_snapshot(c)
+            rec["score_snapshot"] = snap
+            # boolean selected flag
+            rec["selected"] = bool(decision == "selected")
+            # semantic details
+            rec["semantic_mode"] = str(c.get("scores", {}).get("semantic_mode", ""))
+            rec["meaning"] = float(c.get("scores", {}).get("meaning", 0.0))
+            # normalize end reason in audit as per Clause 9
+            rec["end_reason"] = _normalize_end_reason(rec.get("end_reason") or c.get("end_reason", ""))
             audit_map[cid] = rec
 
         def can_add(c, gap_override=None, relax_score=False, relax_meaning=False):
@@ -206,6 +244,7 @@ def run_selection(state: Dict[str, Any]) -> Dict[str, Any]:
                         rescue = c
                         break
                 if rescue is not None:
+                    # append rescue candidate or replace lowest non-late bucket candidate
                     if len(selected) < max_final_clips:
                         selected.append(rescue)
                     else:
@@ -216,10 +255,17 @@ def run_selection(state: Dict[str, Any]) -> Dict[str, Any]:
                         )
                         if worst is not None:
                             selected.remove(worst)
-                            record(worst, "rejected", "rescue_replace", ["REJ_BUCKET_QUOTA_FULL"], "replaced_by_late_bucket")
+                            record(
+                                worst,
+                                "rejected",
+                                "rescue_replace",
+                                ["REJ_BUCKET_QUOTA_FULL"],
+                                "replaced_by_late_bucket",
+                            )
                             selected.append(rescue)
                     record(rescue, "selected", "rescue", ["SEL_RESCUE_LATE"], "late_bucket_rescue")
-                    log_warn(logger, f"late_bucket_rescue: {rescue.get('id')}")
+                    # Log fairness enforcement (Clause G)
+                    logger.info(f"TIME_FAIRNESS_ENFORCED: selected {rescue.get('id')} from last bucket")
                 else:
                     log_warn(logger, "late_bucket_rescue: no eligible candidate")
 
@@ -234,6 +280,9 @@ def run_selection(state: Dict[str, Any]) -> Dict[str, Any]:
                 why = "quota_or_limit_full"
             record(c, "rejected", "post", codes, why)
 
+        # Normalize end_reason for selected clips
+        for c in selected:
+            c["end_reason"] = _normalize_end_reason(c.get("end_reason", ""))
         selected_sorted = sorted(selected, key=lambda c: (c["start"], c["id"]))
         band_counts = {"short": 0, "mid": 0, "long": 0}
 
@@ -686,6 +735,62 @@ def snap_selected(state: Dict[str, Any]) -> Dict[str, Any]:
     state["TRANSCRIPTS"] = transcripts
     state["TRANSCRIPT_CACHE"] = transcript_cache
     state["_SNAP_DONE"] = True
+    # Re-score all candidates after snapping (Stage 11.5) to ensure semantic consistency
+    try:
+        from .scoring import run_scoring  # local import to avoid circular
+        state = run_scoring(state)
+        # Update selection_audit with new semantic_mode and meaning for consistency
+        metadata_dir = Path(state["METADATA_DIR"])
+        audit_path = metadata_dir / "selection_audit.json"
+        try:
+            import json
+            audit_entries = json.loads(audit_path.read_text(encoding="utf-8"))
+        except Exception:
+            audit_entries = []
+        # Build mapping from candidate id to current scores
+        score_map = {}
+        for cand in state.get("CANDIDATES", []):
+            cid = cand.get("id")
+            if cid:
+                score_map[cid] = cand.get("scores", {}) or {}
+        for rec in audit_entries:
+            cid = rec.get("id")
+            if cid and cid in score_map:
+                s = score_map[cid]
+                rec["semantic_mode"] = str(s.get("semantic_mode", rec.get("semantic_mode", "")))
+                rec["meaning"] = float(s.get("meaning", rec.get("meaning", 0.0)))
+            # Ensure 'selected' flag exists
+            if "selected" not in rec:
+                rec["selected"] = bool(rec.get("decision") == "selected")
+            # Normalize end_reason values
+            rec["end_reason"] = _normalize_end_reason(rec.get("end_reason", ""))
+        try:
+            write_json(audit_path, audit_entries)
+        except Exception:
+            pass
+        # Update selected.json with normalized end_reason and latest scores
+        sel_path = metadata_dir / "selected.json"
+        try:
+            sel_entries = json.loads(sel_path.read_text(encoding="utf-8"))
+        except Exception:
+            sel_entries = []
+        changed = False
+        for c in sel_entries:
+            cid = c.get("id")
+            if cid and cid in score_map:
+                c["scores"] = score_map[cid]
+                c["end_reason"] = _normalize_end_reason(c.get("end_reason", ""))
+                changed = True
+        if changed:
+            try:
+                write_json(sel_path, sel_entries)
+                # also update selected_snapped.json to match
+                write_json(metadata_dir / "selected_snapped.json", sel_entries)
+            except Exception:
+                pass
+        # Log rescore status
+        logger.info("RESCORE_AFTER_SNAP: PASS")
+    except Exception as e:
+        logger.warning(f"RESCORE_AFTER_SNAP: FAILED due to {e}")
     log_flush()
-
     return state
