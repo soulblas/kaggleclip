@@ -2,19 +2,21 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import random
 import subprocess
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List
 
 from .agent_contract import load_agent_contract
 from .asr_light import run_asr
-from .candidates import run_candidate_mining
+from .candidates import run_candidate_mining, run_context_expansion, add_marker_candidates
 from .export import ensure_outdir, run_export, write_agent_meta
 from .features import run_feature_extraction
-from .io_utils import write_json, read_json, resolve_output_paths
-from .logging_utils import StageTimer, log_flush, setup_pipeline_logger
+from .io_utils import write_json, load_cached_json, write_cache_meta, resolve_output_paths, stable_hash
+from .logging_utils import StageTimer, log_flush, setup_pipeline_logger, log_i, log_ok, log_warn
 from .scoring import run_scoring
 from .segmentation import run_segmentation
 from .selection import run_selection, snap_selected
@@ -48,16 +50,30 @@ def _resolve_input_video(input_video: str | None) -> Path:
 
 
 def run_pipeline(input_video: str, out_dir: str = "outputs", **kwargs):
+    state: Dict[str, Any] = {}
+
+    seed = int(kwargs.get("seed", os.getenv("PIPELINE_SEED", "1337")))
+    random.seed(seed)
+    try:
+        import numpy as _np  # type: ignore
+
+        _np.random.seed(seed)
+    except Exception:
+        pass
+
+    run_ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    run_suffix = f"{os.getpid() % 10000:04d}"
+    run_id = f"{run_ts}_{run_suffix}"
+
     out_dir_path = ensure_outdir(out_dir)
-    output_paths = resolve_output_paths(out_dir_path)
+    run_dir = Path(out_dir_path) / "runs" / run_id
+    output_paths = resolve_output_paths(run_dir)
 
     agent = load_agent_contract("AGENTS.md")
     write_agent_meta(output_paths["metadata_dir"], agent)
 
     log_file = output_paths["logs_dir"] / "pipeline.log"
     setup_pipeline_logger(log_file)
-
-    state: Dict[str, Any] = {}
 
     state["LOCK_NO_FACE"] = True
     state["LOCK_NO_CROP_ZOOM"] = True
@@ -69,8 +85,8 @@ def run_pipeline(input_video: str, out_dir: str = "outputs", **kwargs):
     state["AUDIO_BITRATE"] = "160k"
     state["EXPORT_MODE"] = "FIT_PAD_BLACK"
 
-    state["MIN_CLIP_SEC"] = 18.0
-    state["MAX_CLIP_SEC"] = 60.0
+    state["MIN_CLIP_SEC"] = 15.0
+    state["MAX_CLIP_SEC"] = 120.0
     state["HOOK_WINDOW_SEC"] = 5.0
 
     state["MAX_FINAL_CLIPS"] = 6
@@ -124,7 +140,10 @@ def run_pipeline(input_video: str, out_dir: str = "outputs", **kwargs):
     state["FFMPEG_BIN"] = "ffmpeg"
     state["FFPROBE_BIN"] = "ffprobe"
 
-    state["RUN_TIMESTAMP"] = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    state["RUN_TIMESTAMP"] = run_ts
+    state["RUN_ID"] = run_id
+    state["SEED"] = seed
+    state["TIME_BUCKETS"] = 5
     state["OUTPUT_PATHS"] = output_paths
     state["OUT_DIR"] = output_paths["base_dir"]
     state["RAW_SEGMENTS_DIR"] = output_paths["raw_segments_dir"]
@@ -139,22 +158,121 @@ def run_pipeline(input_video: str, out_dir: str = "outputs", **kwargs):
     state["TAIL_EXT_SEC"] = float(kwargs.get("tail_ext_sec", 1.6))
     state["TAIL_MAX_SEC"] = float(kwargs.get("tail_max_sec", 3.0))
     state["LEAD_SILENCE_TRIM_SEC"] = float(kwargs.get("lead_silence_trim_sec", 0.8))
-    state["START_EXPAND_MIN"] = float(kwargs.get("start_expand_min", 3.0))
-    state["START_EXPAND_MAX"] = float(kwargs.get("start_expand_max", 8.0))
+    state["START_EXPAND_MIN"] = float(kwargs.get("start_expand_min", 2.0))
+    state["START_EXPAND_MAX"] = float(kwargs.get("start_expand_max", 6.0))
     state["START_SPEECH_WINDOW"] = float(kwargs.get("start_speech_window", 0.6))
     state["SNAP_WORD_RADIUS"] = float(kwargs.get("snap_word_radius", 1.8))
     state["SNAP_SILENCE_RADIUS"] = float(kwargs.get("snap_silence_radius", 1.2))
 
-    # resolve_output_paths already ensures directory creation
+    env_keys = [
+        "USE_FLEXIBLE_DUR",
+        "MIN_DUR_SEC",
+        "MAX_DUR_SEC",
+        "IDEAL_DUR_MIN",
+        "IDEAL_DUR_MAX",
+        "DUR_SHORT_MIN",
+        "DUR_SHORT_MAX",
+        "DUR_MID_MIN",
+        "DUR_MID_MAX",
+        "DUR_LONG_MIN",
+        "DUR_LONG_MAX",
+        "END_LOOKBACK",
+        "END_LOOKAHEAD",
+        "ASR_TOPN_PER_BUCKET",
+        "ASR_MODEL_NAME",
+        "ASR_BEAM_SIZE",
+        "ASR_LIGHT_MODE",
+        "ASR_LIGHT_SEC",
+        "ASR_LIGHT_OFFSET",
+    ]
+    env_overrides = {k: os.getenv(k) for k in env_keys if os.getenv(k) is not None}
+    state["ENV_OVERRIDES"] = env_overrides
 
-    logger.info(f"OUT_DIR: {out_dir_path}")
-    logger.info(
-        "Hard Locks: NO_FACE=%s NO_CROP_ZOOM=%s NO_SUBTITLES=%s",
-        state["LOCK_NO_FACE"],
-        state["LOCK_NO_CROP_ZOOM"],
-        state["LOCK_NO_SUBTITLES"],
-    )
-    log_flush()
+    config_snapshot = {
+        "EXPORT_W": state["EXPORT_W"],
+        "EXPORT_H": state["EXPORT_H"],
+        "EXPORT_FPS": state["EXPORT_FPS"],
+        "AUDIO_BITRATE": state["AUDIO_BITRATE"],
+        "EXPORT_MODE": state["EXPORT_MODE"],
+        "MIN_CLIP_SEC": state["MIN_CLIP_SEC"],
+        "MAX_CLIP_SEC": state["MAX_CLIP_SEC"],
+        "HOOK_WINDOW_SEC": state["HOOK_WINDOW_SEC"],
+        "MAX_FINAL_CLIPS": state["MAX_FINAL_CLIPS"],
+        "MIN_GAP_SEC": state["MIN_GAP_SEC"],
+        "TIME_BUCKETS": state["TIME_BUCKETS"],
+        "ASR_LANGUAGE": state["ASR_LANGUAGE"],
+        "ASR_ENABLED": state["ASR_ENABLED"],
+        "ASR_TOPN_PER_BUCKET": state["ASR_TOPN_PER_BUCKET"],
+        "ASR_MODEL_NAME": state["ASR_MODEL_NAME"],
+        "ASR_BEAM_SIZE": state["ASR_BEAM_SIZE"],
+        "ASR_LIGHT_MODE": state["ASR_LIGHT_MODE"],
+        "ASR_LIGHT_SEC": state["ASR_LIGHT_SEC"],
+        "ASR_LIGHT_OFFSET": state["ASR_LIGHT_OFFSET"],
+        "MAX_ASR_BLOCK_SEC": state["MAX_ASR_BLOCK_SEC"],
+        "ASR_BLOCK_OVERLAP_SEC": state["ASR_BLOCK_OVERLAP_SEC"],
+        "TAIL_EXT_SEC": state["TAIL_EXT_SEC"],
+        "TAIL_MAX_SEC": state["TAIL_MAX_SEC"],
+        "LEAD_SILENCE_TRIM_SEC": state["LEAD_SILENCE_TRIM_SEC"],
+        "START_EXPAND_MIN": state["START_EXPAND_MIN"],
+        "START_EXPAND_MAX": state["START_EXPAND_MAX"],
+        "START_SPEECH_WINDOW": state["START_SPEECH_WINDOW"],
+        "SNAP_WORD_RADIUS": state["SNAP_WORD_RADIUS"],
+        "SNAP_SILENCE_RADIUS": state["SNAP_SILENCE_RADIUS"],
+        "TRIGGER_WORDS": state["TRIGGER_WORDS"],
+    }
+    config_hash = stable_hash({"config": config_snapshot, "env": env_overrides})
+    state["CONFIG_HASH"] = config_hash
+
+    run_manifest = {
+        "run_id": run_id,
+        "run_timestamp_utc": run_ts,
+        "status": "started",
+        "seed": seed,
+        "config_hash": config_hash,
+        "config_snapshot": config_snapshot,
+        "env_overrides": env_overrides,
+        "agent": agent,
+        "output_paths": {k: str(v) for k, v in output_paths.items()},
+    }
+    state["RUN_MANIFEST"] = run_manifest
+    state["RUN_MANIFEST_PATH"] = Path(state["METADATA_DIR"]) / "run_manifest.json"
+    state["RUN_COMPLETE_PATH"] = Path(state["METADATA_DIR"]) / "run_complete.json"
+
+    with StageTimer(0, "Initialization"):
+        def _bin_version(bin_name: str) -> str:
+            try:
+                out = subprocess.check_output([bin_name, "-version"], stderr=subprocess.STDOUT).decode("utf-8")
+                return out.splitlines()[0].strip()
+            except Exception as e:
+                return f"unavailable({e})"
+
+        def _git_sha() -> str:
+            try:
+                out = subprocess.check_output(["git", "rev-parse", "--short", "HEAD"], cwd=str(Path.cwd()))
+                return out.decode("utf-8").strip()
+            except Exception:
+                return "unknown"
+
+        versions = {
+            "python": sys.version.split()[0],
+            "ffmpeg": _bin_version(state["FFMPEG_BIN"]),
+            "ffprobe": _bin_version(state["FFPROBE_BIN"]),
+            "git_sha": _git_sha(),
+            "asr_model": state["ASR_MODEL_NAME"],
+        }
+        state["VERSIONS"] = versions
+        run_manifest["versions"] = versions
+
+        write_json(state["RUN_MANIFEST_PATH"], run_manifest)
+        log_i(logger, f"RUN_ID: {run_id}")
+        log_i(logger, f"OUT_DIR: {run_dir}")
+        log_i(logger, f"CONFIG_HASH: {config_hash[:12]}")
+        log_i(logger, f"SEED: {seed}")
+        if env_overrides:
+            log_i(logger, f"ENV_OVERRIDES: {env_overrides}")
+        log_i(logger, f"VERSIONS: {versions}")
+        log_i(logger, f"LOG_FILE: {log_file}")
+        log_flush()
 
     with StageTimer(1, "Ingest Video"):
         video_path = _resolve_input_video(input_video)
@@ -176,19 +294,44 @@ def run_pipeline(input_video: str, out_dir: str = "outputs", **kwargs):
         state["ANALYZED_DURATION"] = duration
         logger.info(f"Duration: {duration:.2f}s")
 
+        try:
+            st = video_path.stat()
+            video_fingerprint = {
+                "basename": video_path.name,
+                "size_bytes": int(st.st_size),
+                "mtime": float(st.st_mtime),
+                "duration_sec": float(duration),
+            }
+        except Exception:
+            video_fingerprint = {
+                "basename": video_path.name,
+                "size_bytes": -1,
+                "mtime": 0.0,
+                "duration_sec": float(duration),
+            }
+        video_hash = stable_hash(video_fingerprint)
+        state["VIDEO_FINGERPRINT"] = video_fingerprint
+        state["VIDEO_HASH"] = video_hash
+        state["CACHE_META"] = {"video_fingerprint": video_fingerprint, "config_hash": config_hash}
+        state["RUN_MANIFEST"]["video_fingerprint"] = video_fingerprint
+        state["RUN_MANIFEST"]["video_hash"] = video_hash
+        state["RUN_MANIFEST"]["analyzed_duration_sec"] = float(duration)
+        write_json(state["RUN_MANIFEST_PATH"], state["RUN_MANIFEST"])
+
         write_json(
             Path(state["RAW_SEGMENTS_DIR"]) / "video_meta.json",
             {
                 "video_path": str(video_path),
                 "duration_sec": duration,
                 "run_timestamp_utc": state["RUN_TIMESTAMP"],
+                "run_id": state["RUN_ID"],
             },
         )
 
     run_segmentation(state)
 
-    with StageTimer(3, "Thumbnails Sampling (No AI)"):
-        random.seed(1337)
+    with StageTimer(4, "Visual Sampling + Shot Detection"):
+        random.seed(state.get("SEED", 1337))
         duration = float(state["ANALYZED_DURATION"])
         n_thumbs = min(24, max(8, int(duration // 30)))
         ts = sorted({min(duration - 0.1, (i + 1) * duration / (n_thumbs + 1)) for i in range(n_thumbs)})
@@ -219,13 +362,16 @@ def run_pipeline(input_video: str, out_dir: str = "outputs", **kwargs):
         )
         logger.info(f"Sample thumbnails: {len(thumb_paths)}")
 
-    with StageTimer(4, "Shot Detection (Optional)"):
         shot_cuts = []
         shot_path = Path(state["RAW_SEGMENTS_DIR"]) / "shot_cuts.json"
-        if shot_path.exists():
-            shot_cuts = read_json(shot_path)
-            logger.info("Loaded cached shot cuts")
+        cache_meta = state.get("CACHE_META") or {}
+        cached, hit, reason = load_cached_json(shot_path, cache_meta)
+        if hit and isinstance(cached, list):
+            shot_cuts = cached
+            log_i(logger, "CACHE_HIT shot_cuts")
         else:
+            if reason != "missing":
+                log_warn(logger, f"CACHE_MISS shot_cuts ({reason}) -> recompute")
             try:
                 from scenedetect import SceneManager, open_video  # type: ignore[import-not-found]
                 from scenedetect.detectors import ContentDetector  # type: ignore[import-not-found]
@@ -238,6 +384,8 @@ def run_pipeline(input_video: str, out_dir: str = "outputs", **kwargs):
                 for (start, end) in scene_list[1:]:
                     shot_cuts.append(float(start.get_seconds()))
                 write_json(shot_path, shot_cuts)
+                if cache_meta:
+                    write_cache_meta(shot_path, cache_meta)
                 logger.info(f"Shot cuts: {len(shot_cuts)}")
             except Exception as e:
                 logger.warning(f"Shot detection unavailable; continuing without. ({e})")
@@ -249,11 +397,31 @@ def run_pipeline(input_video: str, out_dir: str = "outputs", **kwargs):
         logger.info("This pipeline does not generate SRT/subtitles or burn-in captions.")
 
     run_candidate_mining(state)
+    run_context_expansion(state)
     run_feature_extraction(state)
     run_asr(state)
+    add_marker_candidates(state)
     run_scoring(state)
     run_selection(state)
     snap_selected(state)
     run_export(state)
 
-    return {"status": "ok", "out_dir": str(out_dir_path), "agent": agent}
+    run_manifest = state.get("RUN_MANIFEST", {})
+    run_manifest["status"] = "complete"
+    run_manifest["selected_count"] = len(state.get("SELECTED", []))
+    write_json(state["RUN_MANIFEST_PATH"], run_manifest)
+    write_json(
+        state["RUN_COMPLETE_PATH"],
+        {
+            "run_id": state.get("RUN_ID"),
+            "status": "ok",
+            "completed_at_utc": datetime.now(timezone.utc).isoformat(),
+            "selected_count": len(state.get("SELECTED", [])),
+        },
+    )
+    log_ok(logger, f"Artifacts: {state['RUN_MANIFEST_PATH']}")
+    log_ok(logger, f"Artifacts: {Path(state['METADATA_DIR']) / 'selection_audit.json'}")
+    log_ok(logger, f"Artifacts: {Path(state['METADATA_DIR']) / 'selected.json'}")
+    log_ok(logger, f"Artifacts: {Path(state['METADATA_DIR']) / 'ranking.csv'}")
+
+    return {"status": "ok", "out_dir": str(run_dir), "agent": agent}

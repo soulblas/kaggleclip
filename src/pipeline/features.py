@@ -100,16 +100,17 @@ def compute_features(candidate: Dict[str, Any], state: Dict[str, Any]) -> Dict[s
         "spike_rate": spike_rate,
         "silence_ratio": silence_ratio,
         "near_cut_dist": near_cut_dist,
-        "words_per_sec": 2.0,
+        "words_per_sec": 0.0,
         "trigger_count": 0,
         "markers_abs": [],
+        "has_text": False,
         "start_abs_for_scoring": s,
         "end_abs_for_scoring": e,
     }
 
 
 def run_feature_extraction(state: Dict[str, Any]) -> Dict[str, Any]:
-    with StageTimer(7, "Feature Extraction"):
+    with StageTimer(8, "Feature Extraction"):
         for c in state.get("CANDIDATES", []):
             c["features"] = compute_features(c, state)
         logger.info("Features computed for all candidates.")

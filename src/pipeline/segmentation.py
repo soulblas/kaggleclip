@@ -8,8 +8,8 @@ from typing import Any, Dict, List
 
 import numpy as np
 
-from .io_utils import read_json, write_json
-from .logging_utils import StageTimer, log_flush
+from .io_utils import load_cached_json, write_cache_meta, write_json
+from .logging_utils import StageTimer, log_flush, log_i, log_warn
 
 logger = logging.getLogger("viralshort")
 
@@ -102,10 +102,19 @@ def run_segmentation(state: Dict[str, Any]) -> Dict[str, Any]:
         logger.info(f"Audio extracted: {audio_wav}")
 
         sil_path = Path(raw_dir) / "silence_segments.json"
+        cache_meta = state.get("CACHE_META") or {}
         if sil_path.exists():
-            silence_segments = read_json(sil_path)
-            logger.info("Loaded cached silence_segments.json")
+            cached, hit, reason = load_cached_json(sil_path, cache_meta)
+            if hit and isinstance(cached, list):
+                silence_segments = cached
+                log_i(logger, f"CACHE_HIT silence_segments ({sil_path})")
+            else:
+                log_warn(logger, f"CACHE_MISS silence_segments ({reason}) -> recompute")
+                silence_segments = None
         else:
+            silence_segments = None
+
+        if silence_segments is None:
             silence_cmd = [
                 ffmpeg_bin,
                 "-hide_banner",
@@ -147,6 +156,8 @@ def run_segmentation(state: Dict[str, Any]) -> Dict[str, Any]:
                         j += 1
 
             write_json(sil_path, silence_segments)
+            if cache_meta:
+                write_cache_meta(sil_path, cache_meta)
             logger.info("Wrote silence_segments.json")
 
         logger.info(f"Silence segments: {len(silence_segments)}")
@@ -182,7 +193,7 @@ def run_segmentation(state: Dict[str, Any]) -> Dict[str, Any]:
         write_json(Path(raw_dir) / "energy_curve.json", energy_curve)
         logger.info(f"Energy points: {len(energy_curve)} (saved to energy_curve.json)")
 
-    with StageTimer(2, "Speech Blocks (silence complement + VAD fallback)"):
+    with StageTimer(3, "Speech Blocks (silence complement + VAD fallback)"):
         total = float(analyzed_duration)
         speech_blocks = _speech_blocks_from_silence(total, silence_segments, pad=0.05)
         if not speech_blocks:

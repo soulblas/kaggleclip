@@ -5,10 +5,10 @@ import os
 import subprocess
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List
 
-from .io_utils import read_json, write_json
-from .logging_utils import StageTimer, log_flush
+from .io_utils import load_cached_json, write_cache_meta, write_json
+from .logging_utils import StageTimer, log_flush, log_i, log_warn
 
 logger = logging.getLogger("viralshort")
 
@@ -36,14 +36,14 @@ def safe_unlink(path: Path):
         pass
 
 
-def _bucket_index(t, analyzed_duration):
+def _bucket_index(t, analyzed_duration, time_buckets: int):
     if analyzed_duration <= 0:
         return 0
-    idx = int((t / analyzed_duration) * TIME_BUCKETS)
+    idx = int((t / analyzed_duration) * time_buckets)
     if idx < 0:
         idx = 0
-    if idx >= TIME_BUCKETS:
-        idx = TIME_BUCKETS - 1
+    if idx >= time_buckets:
+        idx = time_buckets - 1
     return idx
 
 
@@ -85,6 +85,7 @@ def _light_window(start, end, asr_light_sec, asr_light_offset):
 
 def run_asr(state: Dict[str, Any]) -> Dict[str, Any]:
     analyzed_duration = float(state.get("ANALYZED_DURATION", 0.0))
+    time_buckets = int(state.get("TIME_BUCKETS", TIME_BUCKETS))
     asr_topn_per_bucket = int(state.get("ASR_TOPN_PER_BUCKET", os.getenv("ASR_TOPN_PER_BUCKET", "4")))
     asr_model_name = state.get("ASR_MODEL_NAME", os.getenv("ASR_MODEL_NAME", "tiny"))
     asr_beam_size = int(state.get("ASR_BEAM_SIZE", os.getenv("ASR_BEAM_SIZE", "1")))
@@ -102,19 +103,18 @@ def run_asr(state: Dict[str, Any]) -> Dict[str, Any]:
     audio_wav = Path(state["AUDIO_WAV"])
     trigger_words = state.get("TRIGGER_WORDS", [])
 
-    with StageTimer(8, "ASR (top-N per bucket, cache, fail-safe)"):
-        transcripts: Dict[str, Any] = {}
+    with StageTimer(9, "ASR (top-N per bucket, cache, fail-safe)"):
+        transcripts_by_id: Dict[str, Any] = {}
+        transcript_cache: Dict[str, Any] = {}
         transcript_cache_path = scored_dir / "transcript.json"
+        cache_meta = state.get("CACHE_META") or {}
 
-        if transcript_cache_path.exists():
-            try:
-                transcripts = read_json(transcript_cache_path) or {}
-                logger.info(
-                    f"Loaded transcript cache: {transcript_cache_path} ({len(transcripts)} items)"
-                )
-            except Exception as e:
-                logger.warning(f"Transcript cache load failed; starting empty. ({e})")
-                transcripts = {}
+        cached, hit, reason = load_cached_json(transcript_cache_path, cache_meta)
+        if hit and isinstance(cached, dict):
+            transcript_cache = cached
+            log_i(logger, f"CACHE_HIT transcript ({len(transcript_cache)} items)")
+        else:
+            log_warn(logger, f"CACHE_MISS transcript ({reason}) -> recompute")
 
         asr_available = False
         model = None
@@ -123,9 +123,8 @@ def run_asr(state: Dict[str, Any]) -> Dict[str, Any]:
                 try:
                     from faster_whisper import WhisperModel
                 except Exception as e:
-                    logger.warning(f"faster-whisper not available ({e}). Trying to install...")
-                    subprocess.run(["pip", "-q", "install", "faster-whisper"], check=True)
-                    from faster_whisper import WhisperModel
+                    logger.warning(f"faster-whisper not available ({e}).")
+                    raise
 
                 model = WhisperModel(asr_model_name, device="cpu", compute_type="int8")
                 asr_available = True
@@ -235,9 +234,9 @@ def run_asr(state: Dict[str, Any]) -> Dict[str, Any]:
         spk_vals = [c.get("features", {}).get("spike_rate", 0.0) for c in candidates]
         sil_vals = [c.get("features", {}).get("silence_ratio", 0.0) for c in candidates]
 
-        bucket_map = {b: [] for b in range(TIME_BUCKETS)}
+        bucket_map = {b: [] for b in range(time_buckets)}
         for c in candidates:
-            b = _bucket_index(float(c.get("start", 0.0)), analyzed_duration)
+            b = _bucket_index(float(c.get("start", 0.0)), analyzed_duration, time_buckets)
             bucket_map[b].append(c)
 
         top_for_asr = []
@@ -256,16 +255,26 @@ def run_asr(state: Dict[str, Any]) -> Dict[str, Any]:
                 f"ASR top-N per bucket: {len(top_for_asr)} candidates (mode={'light' if asr_light_mode else 'full'})"
             )
 
+        video_hash = (state.get("VIDEO_HASH") or "").strip()
+        key_by_id: Dict[str, str] = {}
+
+        def _transcript_cache_key(candidate: Dict[str, Any]) -> str:
+            s = float(candidate.get("start", 0.0))
+            e = float(candidate.get("end", 0.0))
+            params = f"{asr_model_name}|{asr_beam_size}|{asr_light_mode}|{asr_light_sec}|{asr_light_offset}|{asr_language}"
+            return f"{video_hash}:{s:.2f}-{e:.2f}:{params}"
+
         for c in top_for_asr:
             cid = c["id"]
-            existing = transcripts.get(cid, {}) if isinstance(transcripts, dict) else {}
+            cache_key = _transcript_cache_key(c)
+            key_by_id[cid] = cache_key
+            existing = transcript_cache.get(cache_key, {}) if isinstance(transcript_cache, dict) else {}
             if existing.get("text") and existing.get("mode") == "full":
                 out = existing
             else:
                 try:
                     mode = "light" if asr_light_mode else "full"
                     out = transcribe_candidate_abs(c, mode=mode)
-                    transcripts[cid] = out
                 except Exception as e:
                     logger.warning(f"ASR failed for {cid}: {e}")
                     out = {
@@ -277,7 +286,12 @@ def run_asr(state: Dict[str, Any]) -> Dict[str, Any]:
                         "word_count": 0,
                         "mode": "light",
                     }
-                    transcripts[cid] = out
+            out["id"] = cid
+            out["start"] = float(c.get("start", 0.0))
+            out["end"] = float(c.get("end", 0.0))
+            out["video_hash"] = video_hash
+            transcript_cache[cache_key] = out
+            transcripts_by_id[cid] = out
 
             f = c.get("features", {})
             f["words_per_sec"] = float(out.get("words_per_sec", 0.0))
@@ -288,12 +302,16 @@ def run_asr(state: Dict[str, Any]) -> Dict[str, Any]:
             c["features"] = f
 
         try:
-            write_json(transcript_cache_path, transcripts)
-            logger.info(f"Saved transcript cache (entries={len(transcripts)})")
+            write_json(transcript_cache_path, transcript_cache)
+            if cache_meta:
+                write_cache_meta(transcript_cache_path, cache_meta)
+            logger.info(f"Saved transcript cache (entries={len(transcript_cache)})")
         except Exception as e:
             logger.warning(f"Failed to save transcript cache: {e}")
 
-        state["TRANSCRIPTS"] = transcripts
+        state["TRANSCRIPTS"] = transcripts_by_id
+        state["TRANSCRIPT_CACHE"] = transcript_cache
+        state["TRANSCRIPT_KEY_BY_ID"] = key_by_id
         state["ASR_AVAILABLE"] = asr_available
         state["transcribe_candidate_abs"] = transcribe_candidate_abs
 

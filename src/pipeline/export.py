@@ -49,10 +49,11 @@ def export_clip(
     export_h: int,
     fps_export: int,
     audio_bitrate: str,
+    ffmpeg_bin: str,
 ) -> None:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     cmd = [
-        "ffmpeg",
+        ffmpeg_bin,
         "-y",
         "-ss",
         f"{start:.3f}",
@@ -113,10 +114,12 @@ def _validate_clip_file(ffprobe_bin: str, path: Path, expected_dur: float, tol: 
     )
 
 
-def export_thumb(video_path: Path, out_path: Path, t: float, export_w: int, export_h: int) -> None:
+def export_thumb(
+    video_path: Path, out_path: Path, t: float, export_w: int, export_h: int, ffmpeg_bin: str
+) -> None:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     cmd = [
-        "ffmpeg",
+        ffmpeg_bin,
         "-y",
         "-ss",
         f"{t:.3f}",
@@ -144,6 +147,7 @@ def run_export(state: Dict[str, Any]) -> Dict[str, Any]:
     thumbs_dir = Path(state["THUMBS_DIR"])
     metadata_dir = Path(state["METADATA_DIR"])
     ffprobe_bin = state.get("FFPROBE_BIN", "ffprobe")
+    ffmpeg_bin = state.get("FFMPEG_BIN", "ffmpeg")
 
     with StageTimer(
         12,
@@ -171,11 +175,21 @@ def run_export(state: Dict[str, Any]) -> Dict[str, Any]:
             clip_out = clips_dir / f"clip_{rank:02d}_{cid}.mp4"
             thumb_out = thumbs_dir / f"thumb_{rank:02d}_{cid}.jpg"
 
-            export_clip(video_path, clip_out, st, en, export_w, export_h, fps_export, audio_bitrate)
+            export_clip(
+                video_path,
+                clip_out,
+                st,
+                en,
+                export_w,
+                export_h,
+                fps_export,
+                audio_bitrate,
+                ffmpeg_bin,
+            )
             _validate_clip_file(ffprobe_bin, clip_out, expected_dur=(en - st))
 
             t_thumb = st + min(0.5, max(0.0, dur * 0.10))
-            export_thumb(video_path, thumb_out, t_thumb, export_w, export_h)
+            export_thumb(video_path, thumb_out, t_thumb, export_w, export_h, ffmpeg_bin)
 
             er = c.get("editorial_reason", [])
             er = " | ".join(er) if isinstance(er, list) else str(er)
